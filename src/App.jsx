@@ -29,6 +29,7 @@ function VideoSlot({ videoUrl, editHint = 'Edit exercise to add a video.' }) {
   const href = videoUrl.startsWith('url:') ? videoUrl.slice(4) : videoUrl;
   return (<a className="video-ext-link" href={href} target="_blank" rel="noreferrer">▶ Watch video</a>);
 }
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('session');
   const [selectedISO, setSelectedISO] = useState(todayISO());
@@ -51,7 +52,7 @@ export default function App() {
   const [exNoteModal, setExNoteModal] = useState(null);
   const [gateModal, setGateModal] = useState(false);
   const [feedbackModal, setFeedbackModal] = useState(null);
-  const [resetModal, setResetModal] = useState(null); // null | 'day' | 'week'
+  const [resetModal, setResetModal] = useState(null);
   const [resetTargetISO, setResetTargetISO] = useState(null);
   const [modalVal, setModalVal] = useState('');
   const [modalBand, setModalBand] = useState('');
@@ -78,6 +79,35 @@ export default function App() {
   const recIntervalsRef = useRef({});
   const longPressRef = useRef(null);
 
+  // ── AUTO WEEKLY RESET ─────────────────────────────────────────────
+  // Silently wipes the previous week's training days + logs on first
+  // load of a new week. History tab data is preserved.
+  async function autoResetIfNewWeek(currentLogs, currentTrainingDays) {
+    const currentMonday = getWeekMonday();
+    const storedMonday = localStorage.getItem('cali_last_known_week');
+    if (storedMonday === currentMonday) return { logs: currentLogs, trainingDays: currentTrainingDays };
+
+    // New week detected — wipe previous week from Supabase
+    // We don't know which week was previous so we wipe anything NOT in the current week
+    const currentWeekISOs = new Set(getWeekDates().map(d => d.iso));
+    const staleISOs = Object.keys(currentLogs).filter(iso => !currentWeekISOs.has(iso));
+
+    if (staleISOs.length > 0) {
+      await Promise.all(staleISOs.flatMap(iso => [
+        supabase.from('session_logs').delete().eq('iso_date', iso),
+        supabase.from('training_days').delete().eq('iso_date', iso),
+      ]));
+    }
+
+    // Update local state — remove stale days, keep history
+    const freshLogs = { ...currentLogs };
+    staleISOs.forEach(iso => delete freshLogs[iso]);
+    const freshTD = new Set([...currentTrainingDays].filter(iso => currentWeekISOs.has(iso)));
+
+    localStorage.setItem('cali_last_known_week', currentMonday);
+    return { logs: freshLogs, trainingDays: freshTD };
+  }
+
   useEffect(() => {
     async function loadAll() {
       try {
@@ -89,8 +119,18 @@ export default function App() {
           supabase.from('session_history').select('*').order('saved_at', { ascending: true }),
           supabase.from('programme').select('*'),
         ]);
-        if (tdData) setTrainingDays(new Set(tdData.map(r => r.iso_date)));
-        if (logsData) { const m = {}; logsData.forEach(r => { if (!m[r.iso_date]) m[r.iso_date] = {}; m[r.iso_date][`${r.ss_id}_${r.side}`] = r.sets; }); setLogs(m); }
+
+        let rawLogs = {};
+        if (logsData) { logsData.forEach(r => { if (!rawLogs[r.iso_date]) rawLogs[r.iso_date] = {}; rawLogs[r.iso_date][`${r.ss_id}_${r.side}`] = r.sets; }); }
+
+        let rawTD = new Set();
+        if (tdData) rawTD = new Set(tdData.map(r => r.iso_date));
+
+        // Auto-reset if new week
+        const { logs: cleanLogs, trainingDays: cleanTD } = await autoResetIfNewWeek(rawLogs, rawTD);
+        setLogs(cleanLogs);
+        setTrainingDays(cleanTD);
+
         if (snData) { const m = {}; snData.forEach(r => { m[r.iso_date] = r.note; }); setSessionNotes(m); }
         if (enData) { const m = {}; enData.forEach(r => { m[r.note_key] = r.note; }); setExNotes(m); }
         if (histData) setHistory(histData);
@@ -153,16 +193,13 @@ export default function App() {
   }
   async function saveSsNoteOverride(ssId,note) { setSsNoteOverrides(p=>({...p,[ssId]:note})); await supabase.from('programme').upsert({ss_id:ssId,side:'note',overrides:{note}},{onConflict:'ss_id,side'}); }
 
-  // ── RESET FUNCTIONS ──────────────────────────────────────────────
   async function clearDay(iso) {
-    // Delete all data for a specific day
     await Promise.all([
       supabase.from('session_logs').delete().eq('iso_date', iso),
       supabase.from('session_history').delete().eq('iso_date', iso),
       supabase.from('session_notes').delete().eq('iso_date', iso),
       supabase.from('training_days').delete().eq('iso_date', iso),
     ]);
-    // Update local state
     setLogs(p => { const n = {...p}; delete n[iso]; return n; });
     setHistory(p => p.filter(h => h.iso_date !== iso));
     setSessionNotes(p => { const n = {...p}; delete n[iso]; return n; });
@@ -184,13 +221,9 @@ export default function App() {
     setResetModal(null);
   }
 
-  // Long press on day button to trigger day reset
   function onDayPressStart(iso) {
     longPressRef.current = setTimeout(() => {
-      if (hasData(iso) || trainingDays.has(iso)) {
-        setResetTargetISO(iso);
-        setResetModal('day');
-      }
+      if (hasData(iso) || trainingDays.has(iso)) { setResetTargetISO(iso); setResetModal('day'); }
     }, 600);
   }
   function onDayPressEnd() { clearTimeout(longPressRef.current); }
@@ -289,328 +322,212 @@ export default function App() {
         {['session','history','progress'].map(t=>(<button key={t} className={`tab${activeTab===t?' active':''}`} onClick={()=>setActiveTab(t)}>{t.charAt(0).toUpperCase()+t.slice(1)}</button>))}
       </div>
       <div className="scroll">
-        {activeTab==='session'&&(
-          <>
-            <div className="week-strip">
-              {weekDates.map(d=>{
-                const isSel=d.iso===selectedISO,isTrain=trainingDays.has(d.iso),hasD=hasData(d.iso);
-                return(
-                  <button key={d.iso}
-                    className={`day-btn${isSel?' active':isTrain?' training':''}`}
-                    onClick={()=>{setSelectedISO(d.iso);setOpenSS(null);}}
-                    onMouseDown={()=>onDayPressStart(d.iso)}
-                    onMouseUp={onDayPressEnd}
-                    onMouseLeave={onDayPressEnd}
-                    onTouchStart={()=>onDayPressStart(d.iso)}
-                    onTouchEnd={onDayPressEnd}
-                  >
-                    <span className="day-name">{d.label}</span>
-                    <span className="day-num">{d.date}</span>
-                    <span className={`day-dot${hasD||isTrain?' show':''}`}/>
-                  </button>
-                );
-              })}
-            </div>
-            {!isTraining?(
-              <div className="rest-day">
-                <div className="rest-day-date">{formatDate(selectedISO)}</div>
-                <div className="rest-day-title">Rest Day</div>
-                <div className="rest-day-sub">Recovery is part of the programme.</div>
-                <div className="focus-card">
-                  <div className="focus-top-label" style={{color:focusDef.color}}>Today's focus</div>
-                  <div className="focus-title" style={{color:focusDef.color}}>{focusDef.label}</div>
-                  <div className="focus-reason">{focusDef.reason_fn(focus.exercise||'Your session')}</div>
-                  <div>
-                    {focusDef.items.map((item,idx)=>{
-                      const ts=getRecTS(idx,focusDef),isOpen=openRecItem===idx;
-                      const isDur=item.type==='hold'||item.type==='duration';
-                      const m=Math.floor((ts.rem||0)/60),s=String((ts.rem||0)%60).padStart(2,'0');
-                      return(<div key={idx} className={`rec-item${ts.done?' complete':''}`}>
-                        <div className="rec-row" onClick={()=>setOpenRecItem(isOpen?null:idx)}>
-                          <div><div className="rec-name">{ts.done?'✓ ':''}{item.name}</div><div className="rec-meta">{item.target.label||item.target.repsLabel||''}</div></div>
-                          <span className={`rec-arrow${isOpen?' open':''}`}>▼</span>
-                        </div>
-                        {isOpen&&(<div className="rec-panel">
-                          <div className="rec-desc">{item.desc}</div>
-                          <div className="video-slot" style={{marginBottom:12}}><VideoSlot videoUrl={item.video} editHint="Contact coach to add video."/></div>
-                          <div className="rec-tracker">
-                            <div className="tracker-label">Set {ts.currentSet} of {item.target.sets}{ts.done?' — Complete ✓':''}</div>
-                            {isDur?(<>
-                              <div className="timer-display" style={{color:ts.done?'var(--green)':ts.running?'var(--purple)':'var(--text)'}}>{ts.done?'Done':`${m}:${s}`}</div>
-                              <div className="tracker-btns">
-                                {ts.done?(<button className="tracker-btn reset" onClick={()=>resetRecTimer(idx,focusDef)}>Reset</button>)
-                                  :ts.running?(<button className="tracker-btn stop" onClick={()=>stopRecTimer(idx)}>Pause</button>)
-                                  :(<><button className="tracker-btn start" onClick={()=>startRecTimer(idx,focusDef)}>Start</button><button className="tracker-btn reset" onClick={()=>resetRecTimer(idx,focusDef)}>Reset</button></>)}
-                              </div>
-                            </>):(<>
-                              <div className="set-display" style={{color:ts.done?'var(--green)':'var(--text)'}}>{ts.done?'Done ✓':`${item.target.reps} ${item.target.repsLabel}`}</div>
-                              <div className="tracker-btns">
-                                {ts.done?(<button className="tracker-btn reset" onClick={()=>setRecTimers(p=>({...p,[idx]:{running:false,rem:0,currentSet:1,done:false}}))}>Reset</button>)
-                                  :(<button className="tracker-btn next" onClick={()=>nextRecSet(idx,focusDef)}>{ts.currentSet<item.target.sets?'Next set':'Done'}</button>)}
-                              </div>
-                            </>)}
-                          </div>
-                        </div>)}
-                      </div>);
-                    })}
-                  </div>
-                </div>
-                <button className="extras-toggle" onClick={()=>setExtrasOpen(v=>!v)}>
-                  <span>If you have 10 extra minutes</span><span className={`extras-chevron${extrasOpen?' open':''}`}>▼</span>
-                </button>
-                {extrasOpen&&RECOVERY_EXTRAS.map((cat,i)=>(
-                  <div key={i} className="extra-card">
-                    <div className="extra-header" onClick={()=>setOpenExtra(p=>{const n=new Set(p);n.has(i)?n.delete(i):n.add(i);return n;})}>
-                      <div className="extra-dot" style={{background:cat.color}}/>
-                      <span className="extra-label-text" style={{color:cat.color}}>{cat.label}</span>
-                      <span className={`extra-chevron${openExtra.has(i)?' open':''}`}>▼</span>
+        {activeTab==='session'&&(<>
+          <div className="week-strip">
+            {weekDates.map(d=>{
+              const isSel=d.iso===selectedISO,isTrain=trainingDays.has(d.iso);
+              return(<button key={d.iso} className={`day-btn${isSel?' active':isTrain?' training':''}`}
+                onClick={()=>{setSelectedISO(d.iso);setOpenSS(null);}}
+                onMouseDown={()=>onDayPressStart(d.iso)} onMouseUp={onDayPressEnd} onMouseLeave={onDayPressEnd}
+                onTouchStart={()=>onDayPressStart(d.iso)} onTouchEnd={onDayPressEnd}>
+                <span className="day-name">{d.label}</span><span className="day-num">{d.date}</span>
+                <span className={`day-dot${hasData(d.iso)||isTrain?' show':''}`}/>
+              </button>);
+            })}
+          </div>
+          {!isTraining?(
+            <div className="rest-day">
+              <div className="rest-day-date">{formatDate(selectedISO)}</div>
+              <div className="rest-day-title">Rest Day</div>
+              <div className="rest-day-sub">Recovery is part of the programme.</div>
+              <div className="focus-card">
+                <div className="focus-top-label" style={{color:focusDef.color}}>Today's focus</div>
+                <div className="focus-title" style={{color:focusDef.color}}>{focusDef.label}</div>
+                <div className="focus-reason">{focusDef.reason_fn(focus.exercise||'Your session')}</div>
+                <div>{focusDef.items.map((item,idx)=>{
+                  const ts=getRecTS(idx,focusDef),isOpen=openRecItem===idx;
+                  const isDur=item.type==='hold'||item.type==='duration';
+                  const m=Math.floor((ts.rem||0)/60),s=String((ts.rem||0)%60).padStart(2,'0');
+                  return(<div key={idx} className={`rec-item${ts.done?' complete':''}`}>
+                    <div className="rec-row" onClick={()=>setOpenRecItem(isOpen?null:idx)}>
+                      <div><div className="rec-name">{ts.done?'✓ ':''}{item.name}</div><div className="rec-meta">{item.target.label||item.target.repsLabel||''}</div></div>
+                      <span className={`rec-arrow${isOpen?' open':''}`}>▼</span>
                     </div>
-                    {openExtra.has(i)&&(<div className="extra-body">{cat.items.map((item,j)=>(<div key={j} className="extra-item"><div style={{fontSize:13,fontWeight:600,marginBottom:2}}>{item.name}</div><div style={{fontSize:11,color:'var(--text3)',lineHeight:1.5}}>{item.desc}</div></div>))}</div>)}
-                  </div>
-                ))}
-                <button className="mark-training-btn" onClick={()=>markTrainingDay(selectedISO)}>+ Mark as training day</button>
-              </div>
-            ):(
-              <>
-                {rehabOn&&<div className="rehab-banner">Rehab protocol active.</div>}
-                {doneSetsCount(selectedISO)>0&&unloggedSets(selectedISO).length>0&&(<div className="incomplete-banner" onClick={()=>setGateModal(true)}>{unloggedSets(selectedISO).length} set{unloggedSets(selectedISO).length>1?'s':''} not yet logged</div>)}
-                <div className="progress-bar"><div className="progress-fill" style={{width:`${prog.pct}%`}}/></div>
-                <div className="progress-label">{prog.decided} / {prog.total} sets — {prog.pct}%</div>
-                {activeSS.map((ss,i)=>{
-                  const isOpen=openSS===ss.id,done=ssDone(selectedISO,ss.id);
-                  return(<div key={ss.id} className={`ss-card${done?' done-card':''}`}>
-                    <div className="ss-header" onClick={()=>setOpenSS(isOpen?null:ss.id)}>
-                      <div className="ss-meta">
-                        <div className="ss-label-row">
-                          <span className="ss-label">{ss.label}</span>
-                          <button className="btn-icon" onClick={e=>{e.stopPropagation();setSsNoteInput(getSSnote(ss));setSsNoteModal({ssId:ss.id,label:ss.label});}} title="Edit note"><Pencil size={13}/></button>
-                        </div>
-                        <div className="ss-note">{getSSnote(ss)}</div>
+                    {isOpen&&(<div className="rec-panel">
+                      <div className="rec-desc">{item.desc}</div>
+                      <div className="video-slot" style={{marginBottom:12}}><VideoSlot videoUrl={item.video} editHint="Contact coach to add video."/></div>
+                      <div className="rec-tracker">
+                        <div className="tracker-label">Set {ts.currentSet} of {item.target.sets}{ts.done?' — Complete ✓':''}</div>
+                        {isDur?(<><div className="timer-display" style={{color:ts.done?'var(--green)':ts.running?'var(--purple)':'var(--text)'}}>{ts.done?'Done':`${m}:${s}`}</div>
+                          <div className="tracker-btns">{ts.done?(<button className="tracker-btn reset" onClick={()=>resetRecTimer(idx,focusDef)}>Reset</button>):ts.running?(<button className="tracker-btn stop" onClick={()=>stopRecTimer(idx)}>Pause</button>):(<><button className="tracker-btn start" onClick={()=>startRecTimer(idx,focusDef)}>Start</button><button className="tracker-btn reset" onClick={()=>resetRecTimer(idx,focusDef)}>Reset</button></>)}</div>
+                        </>):(<><div className="set-display" style={{color:ts.done?'var(--green)':'var(--text)'}}>{ts.done?'Done ✓':`${item.target.reps} ${item.target.repsLabel}`}</div>
+                          <div className="tracker-btns">{ts.done?(<button className="tracker-btn reset" onClick={()=>setRecTimers(p=>({...p,[idx]:{running:false,rem:0,currentSet:1,done:false}}))}>Reset</button>):(<button className="tracker-btn next" onClick={()=>nextRecSet(idx,focusDef)}>{ts.currentSet<item.target.sets?'Next set':'Done'}</button>)}</div>
+                        </>)}
                       </div>
-                      {done&&<span className="ss-done-badge">DONE ✓</span>}
-                      <span className={`ss-chevron${isOpen?' open':''}`}>▼</span>
-                    </div>
-                    {isOpen&&(<div>
-                      {ss.id!=='ssR'&&(<div className="reorder-controls">
-                        <span style={{fontSize:11,color:'var(--text3)',flex:1}}>Reorder</span>
-                        <button className="reorder-btn" disabled={i===0} onClick={()=>{const a=[...supersets];[a[i],a[i-1]]=[a[i-1],a[i]];setSupersets(a);}}>&#8593;</button>
-                        <button className="reorder-btn" disabled={i===supersets.length-1} onClick={()=>{const a=[...supersets];[a[i],a[i+1]]=[a[i+1],a[i]];setSupersets(a);}}>&#8595;</button>
-                      </div>)}
-                      {['push','pull'].map((side,si)=>{
-                        const ex=ss[side],sets=getSets(selectedISO,ss.id,side);
-                        const nk=`${selectedISO}_${ss.id}_${side}`,en=exNotes[nk]||'';
-                        const videoUrl=getExVideo(ss.id,side);
-                        return(<div key={side}>
-                          {si===1&&<div className="ex-divider"/>}
-                          <div className="ex-block">
-                            <div className="ex-top">
-                              <span className="ex-name">{ex.name}</span>
-                              <div style={{display:'flex',gap:6,alignItems:'center'}}>
-                                <span className="ex-role">{ex.role}</span>
-                                <button className="btn-icon" onClick={e=>{e.stopPropagation();openEditModal(ss.id,side);}} title="Edit"><Pencil size={13}/></button>
-                              </div>
-                            </div>
-                            <div className="coaching-cue">{ex.coaching}</div>
-                            <div className="ex-target">Target: {ex.target} · {ex.band}</div>
-                            <div className="video-slot"><VideoSlot videoUrl={videoUrl} editHint="Tap edit to add a video."/></div>
-                            <div className="sets-row">
-                              {sets.map((s,idx)=>(
-                                <button key={idx} className={`set-btn${s.missed?' missed':s.skipped?' skipped':s.done?' done':''}`}
-                                  onClick={()=>{setModalVal(s.done?s.val:'');setModalBand(s.done?s.band:ex.band);setModalFeel(s.done?s.feel:'');setLogModal({iso:selectedISO,ssId:ss.id,side,setIdx:idx});}}>
-                                  <span className="set-num">Set {idx+1}</span>
-                                  {s.missed&&<span className="set-val">0</span>}
-                                  {s.skipped&&<span className="set-val">Skip</span>}
-                                  {s.done&&<><span className="set-val">✓ {s.val}</span><span className="set-feel">{s.feel}</span></>}
-                                </button>
-                              ))}
-                            </div>
-                            {en?(<><div className="ex-note-text">{en}</div><button className="ex-note-btn" style={{marginTop:4}} onClick={()=>{setExNoteInput(en);setExNoteModal({iso:selectedISO,ssId:ss.id,side});}}>Edit note</button></>)
-                              :(<button className="ex-note-btn" onClick={()=>{setExNoteInput('');setExNoteModal({iso:selectedISO,ssId:ss.id,side});}}>+ Add note</button>)}
-                          </div>
-                        </div>);
-                      })}
                     </div>)}
                   </div>);
-                })}
-                <div className="session-note-wrap">
-                  <textarea className="session-note-input" rows={2} placeholder="Session notes…"
-                    defaultValue={sessionNotes[selectedISO]||''}
-                    onChange={e=>{noteBufferRef.current[selectedISO]=e.target.value;}}
-                    onBlur={()=>flushNote(selectedISO)}/>
+                })}</div>
+              </div>
+              <button className="extras-toggle" onClick={()=>setExtrasOpen(v=>!v)}><span>If you have 10 extra minutes</span><span className={`extras-chevron${extrasOpen?' open':''}`}>▼</span></button>
+              {extrasOpen&&RECOVERY_EXTRAS.map((cat,i)=>(<div key={i} className="extra-card">
+                <div className="extra-header" onClick={()=>setOpenExtra(p=>{const n=new Set(p);n.has(i)?n.delete(i):n.add(i);return n;})}>
+                  <div className="extra-dot" style={{background:cat.color}}/><span className="extra-label-text" style={{color:cat.color}}>{cat.label}</span><span className={`extra-chevron${openExtra.has(i)?' open':''}`}>▼</span>
                 </div>
-                {!hasData(selectedISO)&&(<div style={{padding:'0 16px'}}><button className="unmark-btn" onClick={()=>unmarkTrainingDay(selectedISO)}>Remove training day</button></div>)}
-                <div style={{height:80}}/>
-              </>
-            )}
-          </>
-        )}
-        {activeTab==='history'&&(
-          <>
-            <div style={{height:4}}/>
-            <div className="week-summary">
-              <div style={{padding:'12px 14px',background:'var(--bg3)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                <span style={{fontSize:13,fontWeight:700}}>This week</span>
-                <span style={{fontSize:11,color:'var(--text3)'}}>{weekDates[0].full} – {weekDates[6].full}</span>
-              </div>
-              <div className="week-stats">
-                {[{val:ws.sessions,label:'Sessions',color:'var(--purple)'},{val:ws.totalSets,label:'Sets done',color:'var(--blue)'},{val:`${ws.consistency}%`,label:'Consistency',color:ws.consistency>=100?'var(--green)':ws.consistency>=66?'var(--purple)':ws.consistency>=33?'var(--amber)':'var(--red)'}].map(({val,label,color})=>(
-                  <div key={label} className="week-stat"><div className="week-stat-val" style={{color}}>{val}</div><div className="week-stat-label">{label}</div></div>
-                ))}
-              </div>
-              <div style={{padding:'10px 14px 12px',borderTop:'0.5px solid var(--border)'}}>
-                <div style={{fontSize:11,color:'var(--text3)',marginBottom:6,display:'flex',justifyContent:'space-between'}}>
-                  <span>Weekly target (3 sessions)</span><span style={{fontWeight:600,color:ws.consistency>=100?'var(--green)':'var(--amber)'}}>{ws.sessions}/3</span>
-                </div>
-                <div style={{height:6,background:'var(--bg3)',borderRadius:3,overflow:'hidden'}}><div style={{height:'100%',borderRadius:3,background:'var(--purple)',width:`${ws.consistency}%`}}/></div>
-              </div>
-              {ws.bests.length>0&&(<div style={{padding:'10px 14px 12px',borderTop:'0.5px solid var(--border)'}}>
-                <div style={{fontSize:11,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',fontWeight:600,marginBottom:8}}>Best this week</div>
-                {ws.bests.map(b=>(<div key={b.label} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'0.5px solid var(--border)'}}><span style={{fontSize:12,color:'var(--text2)'}}>{b.label}</span><span style={{fontSize:13,fontWeight:700,color:'var(--green)'}}>{b.best}</span></div>))}
-              </div>)}
+                {openExtra.has(i)&&(<div className="extra-body">{cat.items.map((item,j)=>(<div key={j} className="extra-item"><div style={{fontSize:13,fontWeight:600,marginBottom:2}}>{item.name}</div><div style={{fontSize:11,color:'var(--text3)',lineHeight:1.5}}>{item.desc}</div></div>))}</div>)}
+              </div>))}
+              <button className="mark-training-btn" onClick={()=>markTrainingDay(selectedISO)}>+ Mark as training day</button>
             </div>
-            {history.length===0?(<div style={{textAlign:'center',padding:'40px 16px',color:'var(--text3)',fontSize:13,lineHeight:1.8}}>No sessions saved yet.<br/>Log sets and tap <strong style={{color:'var(--text2)'}}>Save session</strong>.</div>)
-              :([...history].reverse().map(sess=>{
-                const iso=sess.iso_date;
-                const doneCount=Object.values(sess.log??{}).flat().filter(s=>s?.done).length;
-                const skippedCount=Object.values(sess.log??{}).flat().filter(s=>s?.skipped).length;
-                const isExp=expandedSession===iso;
-                const feelLabel=sess.overall_feel?FEEL_LABELS[sess.overall_feel-1]:'';
-                return(<div key={iso} className={`session-card${isExp?' expanded':''}`} onClick={()=>setExpandedSession(isExp?null:iso)}>
-                  <div style={{padding:'12px 14px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                    <span style={{fontSize:13,fontWeight:600}}>{sess.date_label||formatDate(iso)}</span>
-                    <div style={{display:'flex',alignItems:'center',gap:6}}>
-                      {feelLabel&&<span style={{fontSize:10,fontWeight:700,color:'var(--purple)',background:'#2e1d5c',padding:'2px 8px',borderRadius:20}}>{feelLabel}</span>}
-                      {sess.session_number&&<span style={{fontSize:10,color:'var(--text3)'}}>S{sess.session_number}</span>}
-                      <span style={{fontSize:11,color:'var(--text3)'}}>{doneCount} sets{skippedCount>0?` · ${skippedCount} skipped`:''}</span>
-                      <span className={`session-chevron${isExp?' open':''}`}>▼</span>
+          ):(
+            <>
+              {rehabOn&&<div className="rehab-banner">Rehab protocol active.</div>}
+              {doneSetsCount(selectedISO)>0&&unloggedSets(selectedISO).length>0&&(<div className="incomplete-banner" onClick={()=>setGateModal(true)}>{unloggedSets(selectedISO).length} set{unloggedSets(selectedISO).length>1?'s':''} not yet logged</div>)}
+              <div className="progress-bar"><div className="progress-fill" style={{width:`${prog.pct}%`}}/></div>
+              <div className="progress-label">{prog.decided} / {prog.total} sets — {prog.pct}%</div>
+              {activeSS.map((ss,i)=>{
+                const isOpen=openSS===ss.id,done=ssDone(selectedISO,ss.id);
+                return(<div key={ss.id} className={`ss-card${done?' done-card':''}`}>
+                  <div className="ss-header" onClick={()=>setOpenSS(isOpen?null:ss.id)}>
+                    <div className="ss-meta">
+                      <div className="ss-label-row"><span className="ss-label">{ss.label}</span><button className="btn-icon" onClick={e=>{e.stopPropagation();setSsNoteInput(getSSnote(ss));setSsNoteModal({ssId:ss.id,label:ss.label});}} title="Edit note"><Pencil size={13}/></button></div>
+                      <div className="ss-note">{getSSnote(ss)}</div>
                     </div>
+                    {done&&<span className="ss-done-badge">DONE ✓</span>}
+                    <span className={`ss-chevron${isOpen?' open':''}`}>▼</span>
                   </div>
-                  {isExp&&(<div className="session-detail">
-                    {sess.physical_flags&&(<div style={{marginTop:8,padding:'8px 10px',background:'var(--red-bg)',border:'1px solid var(--red)',borderRadius:8,fontSize:11,color:'var(--red)'}}>{sess.physical_flags}</div>)}
-                    {[...INIT_SS,REHAB_SS].map(ss=>{
-                      const rows=['push','pull'].flatMap(side=>{ const sets=(sess.log??{})[`${ss.id}_${side}`]??[]; const rel=sets.filter(s=>s?.done||s?.skipped||s?.missed); return rel.length?[{name:ss[side]?.name,sets:rel}]:[]; });
-                      if(!rows.length) return null;
-                      return(<div key={ss.id} style={{marginTop:10}}>
-                        <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:6}}>{ss.label}</div>
-                        {rows.map(({name,sets})=>(<div key={name} style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',padding:'6px 0',borderBottom:'0.5px solid var(--border)'}}>
-                          <span style={{fontSize:12,color:'var(--text2)',flex:1,marginRight:8}}>{name}</span>
-                          <div style={{display:'flex',gap:4,flexWrap:'wrap',justifyContent:'flex-end'}}>{sets.map((s,i)=>(<span key={i} className={`session-set-pill ${s.missed?'missed':s.skipped?'skipped':'done'}`}>{s.missed?'0':s.skipped?'skip':`${s.val}${s.feel?` · ${s.feel}`:''}`}</span>))}</div>
-                        </div>))}
+                  {isOpen&&(<div>
+                    {ss.id!=='ssR'&&(<div className="reorder-controls"><span style={{fontSize:11,color:'var(--text3)',flex:1}}>Reorder</span>
+                      <button className="reorder-btn" disabled={i===0} onClick={()=>{const a=[...supersets];[a[i],a[i-1]]=[a[i-1],a[i]];setSupersets(a);}}>&#8593;</button>
+                      <button className="reorder-btn" disabled={i===supersets.length-1} onClick={()=>{const a=[...supersets];[a[i],a[i+1]]=[a[i+1],a[i]];setSupersets(a);}}>&#8595;</button>
+                    </div>)}
+                    {['push','pull'].map((side,si)=>{
+                      const ex=ss[side],sets=getSets(selectedISO,ss.id,side);
+                      const nk=`${selectedISO}_${ss.id}_${side}`,en=exNotes[nk]||'';
+                      return(<div key={side}>
+                        {si===1&&<div className="ex-divider"/>}
+                        <div className="ex-block">
+                          <div className="ex-top"><span className="ex-name">{ex.name}</span>
+                            <div style={{display:'flex',gap:6,alignItems:'center'}}><span className="ex-role">{ex.role}</span><button className="btn-icon" onClick={e=>{e.stopPropagation();openEditModal(ss.id,side);}} title="Edit"><Pencil size={13}/></button></div>
+                          </div>
+                          <div className="coaching-cue">{ex.coaching}</div>
+                          <div className="ex-target">Target: {ex.target} · {ex.band}</div>
+                          <div className="video-slot"><VideoSlot videoUrl={getExVideo(ss.id,side)} editHint="Tap edit to add a video."/></div>
+                          <div className="sets-row">{sets.map((s,idx)=>(
+                            <button key={idx} className={`set-btn${s.missed?' missed':s.skipped?' skipped':s.done?' done':''}`}
+                              onClick={()=>{setModalVal(s.done?s.val:'');setModalBand(s.done?s.band:ex.band);setModalFeel(s.done?s.feel:'');setLogModal({iso:selectedISO,ssId:ss.id,side,setIdx:idx});}}>
+                              <span className="set-num">Set {idx+1}</span>
+                              {s.missed&&<span className="set-val">0</span>}{s.skipped&&<span className="set-val">Skip</span>}
+                              {s.done&&<><span className="set-val">✓ {s.val}</span><span className="set-feel">{s.feel}</span></>}
+                            </button>
+                          ))}</div>
+                          {en?(<><div className="ex-note-text">{en}</div><button className="ex-note-btn" style={{marginTop:4}} onClick={()=>{setExNoteInput(en);setExNoteModal({iso:selectedISO,ssId:ss.id,side});}}>Edit note</button></>)
+                            :(<button className="ex-note-btn" onClick={()=>{setExNoteInput('');setExNoteModal({iso:selectedISO,ssId:ss.id,side});}}>+ Add note</button>)}
+                        </div>
                       </div>);
                     })}
-                    {sess.note&&<div style={{fontSize:11,color:'var(--text3)',marginTop:10,paddingTop:8,borderTop:'0.5px solid var(--border)',fontStyle:'italic'}}>{sess.note}</div>}
                   </div>)}
                 </div>);
-              }))
-            }
-            <div style={{height:40}}/>
-          </>
-        )}
-        {activeTab==='progress'&&(
-          <>
-            <div className="prog-select-wrap">
-              <select className="prog-select" value={selectedExKey} onChange={e=>setSelectedExKey(e.target.value)}>
-                {allExercises().map(ex=>{const key=`${ex.ssId}_${ex.side}`;return<option key={key} value={key}>{ex.name}</option>;})}
-              </select>
+              })}
+              <div className="session-note-wrap"><textarea className="session-note-input" rows={2} placeholder="Session notes…" defaultValue={sessionNotes[selectedISO]||''} onChange={e=>{noteBufferRef.current[selectedISO]=e.target.value;}} onBlur={()=>flushNote(selectedISO)}/></div>
+              {!hasData(selectedISO)&&(<div style={{padding:'0 16px'}}><button className="unmark-btn" onClick={()=>unmarkTrainingDay(selectedISO)}>Remove training day</button></div>)}
+              <div style={{height:80}}/>
+            </>
+          )}
+        </>)}
+        {activeTab==='history'&&(<>
+          <div style={{height:4}}/>
+          <div className="week-summary">
+            <div style={{padding:'12px 14px',background:'var(--bg3)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <span style={{fontSize:13,fontWeight:700}}>This week</span><span style={{fontSize:11,color:'var(--text3)'}}>{weekDates[0].full} – {weekDates[6].full}</span>
             </div>
-            <div className="prog-content">
-              {(()=>{
-                const [ssId,side]=selectedExKey.split('_');
-                const exHist=getExHistory(ssId,side);
-                const total=totalSetsDone(ssId,side);
-                const best=exHist.length?Math.max(...exHist.map(p=>p.best)):0;
-                const latest=exHist.length?exHist[exHist.length-1].best:0;
-                const prev=exHist.length>1?exHist[exHist.length-2].best:null;
-                const delta=prev!==null?+(latest-prev).toFixed(1):null;
-                const selEx=allExercises().find(e=>`${e.ssId}_${e.side}`===selectedExKey);
-                return(<>
-                  <div style={{fontSize:16,fontWeight:700,marginBottom:12}}>{selEx?.name}</div>
-                  <div className="stat-row">
-                    {[{l:'Total sets',v:total,c:'var(--purple)'},{l:'Sessions',v:exHist.length,c:'var(--blue)'},{l:'Best',v:best||'—',c:'var(--green)'}].map(({l,v,c})=>(
-                      <div key={l} className="stat-card"><div className="stat-label">{l}</div><div className="stat-val" style={{color:c}}>{v}</div></div>
-                    ))}
+            <div className="week-stats">{[{val:ws.sessions,label:'Sessions',color:'var(--purple)'},{val:ws.totalSets,label:'Sets done',color:'var(--blue)'},{val:`${ws.consistency}%`,label:'Consistency',color:ws.consistency>=100?'var(--green)':ws.consistency>=66?'var(--purple)':ws.consistency>=33?'var(--amber)':'var(--red)'}].map(({val,label,color})=>(<div key={label} className="week-stat"><div className="week-stat-val" style={{color}}>{val}</div><div className="week-stat-label">{label}</div></div>))}</div>
+            <div style={{padding:'10px 14px 12px',borderTop:'0.5px solid var(--border)'}}>
+              <div style={{fontSize:11,color:'var(--text3)',marginBottom:6,display:'flex',justifyContent:'space-between'}}><span>Weekly target (3 sessions)</span><span style={{fontWeight:600,color:ws.consistency>=100?'var(--green)':'var(--amber)'}}>{ws.sessions}/3</span></div>
+              <div style={{height:6,background:'var(--bg3)',borderRadius:3,overflow:'hidden'}}><div style={{height:'100%',borderRadius:3,background:'var(--purple)',width:`${ws.consistency}%`}}/></div>
+            </div>
+            {ws.bests.length>0&&(<div style={{padding:'10px 14px 12px',borderTop:'0.5px solid var(--border)'}}>
+              <div style={{fontSize:11,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',fontWeight:600,marginBottom:8}}>Best this week</div>
+              {ws.bests.map(b=>(<div key={b.label} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'0.5px solid var(--border)'}}><span style={{fontSize:12,color:'var(--text2)'}}>{b.label}</span><span style={{fontSize:13,fontWeight:700,color:'var(--green)'}}>{b.best}</span></div>))}
+            </div>)}
+          </div>
+          {history.length===0?(<div style={{textAlign:'center',padding:'40px 16px',color:'var(--text3)',fontSize:13,lineHeight:1.8}}>No sessions saved yet.<br/>Log sets and tap <strong style={{color:'var(--text2)'}}>Save session</strong>.</div>)
+            :([...history].reverse().map(sess=>{
+              const iso=sess.iso_date,doneCount=Object.values(sess.log??{}).flat().filter(s=>s?.done).length,skippedCount=Object.values(sess.log??{}).flat().filter(s=>s?.skipped).length,isExp=expandedSession===iso,feelLabel=sess.overall_feel?FEEL_LABELS[sess.overall_feel-1]:'';
+              return(<div key={iso} className={`session-card${isExp?' expanded':''}`} onClick={()=>setExpandedSession(isExp?null:iso)}>
+                <div style={{padding:'12px 14px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                  <span style={{fontSize:13,fontWeight:600}}>{sess.date_label||formatDate(iso)}</span>
+                  <div style={{display:'flex',alignItems:'center',gap:6}}>
+                    {feelLabel&&<span style={{fontSize:10,fontWeight:700,color:'var(--purple)',background:'#2e1d5c',padding:'2px 8px',borderRadius:20}}>{feelLabel}</span>}
+                    {sess.session_number&&<span style={{fontSize:10,color:'var(--text3)'}}>S{sess.session_number}</span>}
+                    <span style={{fontSize:11,color:'var(--text3)'}}>{doneCount} sets{skippedCount>0?` · ${skippedCount} skipped`:''}</span>
+                    <span className={`session-chevron${isExp?' open':''}`}>▼</span>
                   </div>
-                  {delta!==null&&(<div style={{fontSize:12,fontWeight:600,color:delta>0?'var(--green)':delta<0?'var(--red)':'var(--text3)',marginBottom:12}}>{delta>=0?'+':''}{delta} vs previous session</div>)}
-                  {exHist.length>1?(<div className="chart-card">
-                    <div style={{fontSize:11,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',fontWeight:600,marginBottom:12}}>Best per session</div>
-                    <div className="bars">
-                      {exHist.slice(-10).map((p,i,arr)=>{
-                        const max=Math.max(...arr.map(x=>x.best)); const h=max?Math.max(8,Math.round(p.best/max*68)):8; const isLast=i===arr.length-1;
-                        return(<div key={i} className="bar-col">
-                          <span style={{fontSize:9,fontWeight:700,color:isLast?'var(--purple)':'var(--text3)'}}>{p.best}</span>
-                          <div className="bar" style={{height:h,background:isLast?'var(--purple)':'#5b21b666'}}/>
-                          <span style={{fontSize:9,color:'var(--text3)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%',textAlign:'center'}}>{p.date.replace(/\s?\d{4}/,'').trim().slice(0,7)}</span>
-                        </div>);
-                      })}
-                    </div>
-                  </div>):exHist.length===1?(
-                    <div className="chart-card" style={{textAlign:'center',padding:24}}><div style={{fontSize:13,color:'var(--text3)'}}>Log more sessions to see your chart</div><div style={{fontSize:36,fontWeight:800,color:'var(--purple)',marginTop:8}}>{exHist[0].best}</div></div>
-                  ):(<div className="chart-card" style={{textAlign:'center',padding:24}}><div style={{fontSize:13,color:'var(--text3)'}}>No data yet.</div></div>)}
-                  {exHist.length>0&&(<div className="chart-card">
-                    <div style={{fontSize:11,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',fontWeight:600,marginBottom:8}}>Last session — {exHist[exHist.length-1].date}</div>
-                    {exHist[exHist.length-1].sets.map((s,i)=>(<div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'5px 0',borderBottom:'0.5px solid var(--border)'}}>
-                      <span style={{fontSize:12,color:'var(--text2)'}}>Set {i+1}</span>
-                      <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                        {s.band&&s.band!=='Unassisted'&&<span style={{fontSize:10,color:'var(--blue)',background:'#0d1f3c',padding:'2px 7px',borderRadius:10}}>{s.band}</span>}
-                        {s.feel&&<span style={{fontSize:10,color:'var(--text3)'}}>{s.feel}</span>}
-                        <span style={{fontSize:13,fontWeight:700,color:'var(--green)'}}>{s.val}</span>
-                      </div>
-                    </div>))}
-                  </div>)}
-                </>);
-              })()}
-            </div>
-            <div style={{height:40}}/>
-          </>
-        )}
+                </div>
+                {isExp&&(<div className="session-detail">
+                  {sess.physical_flags&&(<div style={{marginTop:8,padding:'8px 10px',background:'var(--red-bg)',border:'1px solid var(--red)',borderRadius:8,fontSize:11,color:'var(--red)'}}>{sess.physical_flags}</div>)}
+                  {[...INIT_SS,REHAB_SS].map(ss=>{
+                    const rows=['push','pull'].flatMap(side=>{ const sets=(sess.log??{})[`${ss.id}_${side}`]??[]; const rel=sets.filter(s=>s?.done||s?.skipped||s?.missed); return rel.length?[{name:ss[side]?.name,sets:rel}]:[]; });
+                    if(!rows.length) return null;
+                    return(<div key={ss.id} style={{marginTop:10}}>
+                      <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:6}}>{ss.label}</div>
+                      {rows.map(({name,sets})=>(<div key={name} style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',padding:'6px 0',borderBottom:'0.5px solid var(--border)'}}>
+                        <span style={{fontSize:12,color:'var(--text2)',flex:1,marginRight:8}}>{name}</span>
+                        <div style={{display:'flex',gap:4,flexWrap:'wrap',justifyContent:'flex-end'}}>{sets.map((s,i)=>(<span key={i} className={`session-set-pill ${s.missed?'missed':s.skipped?'skipped':'done'}`}>{s.missed?'0':s.skipped?'skip':`${s.val}${s.feel?` · ${s.feel}`:''}`}</span>))}</div>
+                      </div>))}
+                    </div>);
+                  })}
+                  {sess.note&&<div style={{fontSize:11,color:'var(--text3)',marginTop:10,paddingTop:8,borderTop:'0.5px solid var(--border)',fontStyle:'italic'}}>{sess.note}</div>}
+                </div>)}
+              </div>);
+            }))
+          }
+          <div style={{height:40}}/>
+        </>)}
+        {activeTab==='progress'&&(<>
+          <div className="prog-select-wrap"><select className="prog-select" value={selectedExKey} onChange={e=>setSelectedExKey(e.target.value)}>{allExercises().map(ex=>{const key=`${ex.ssId}_${ex.side}`;return<option key={key} value={key}>{ex.name}</option>;})}</select></div>
+          <div className="prog-content">{(()=>{
+            const [ssId,side]=selectedExKey.split('_'),exHist=getExHistory(ssId,side),total=totalSetsDone(ssId,side);
+            const best=exHist.length?Math.max(...exHist.map(p=>p.best)):0,latest=exHist.length?exHist[exHist.length-1].best:0;
+            const prev=exHist.length>1?exHist[exHist.length-2].best:null,delta=prev!==null?+(latest-prev).toFixed(1):null;
+            const selEx=allExercises().find(e=>`${e.ssId}_${e.side}`===selectedExKey);
+            return(<>
+              <div style={{fontSize:16,fontWeight:700,marginBottom:12}}>{selEx?.name}</div>
+              <div className="stat-row">{[{l:'Total sets',v:total,c:'var(--purple)'},{l:'Sessions',v:exHist.length,c:'var(--blue)'},{l:'Best',v:best||'—',c:'var(--green)'}].map(({l,v,c})=>(<div key={l} className="stat-card"><div className="stat-label">{l}</div><div className="stat-val" style={{color:c}}>{v}</div></div>))}</div>
+              {delta!==null&&(<div style={{fontSize:12,fontWeight:600,color:delta>0?'var(--green)':delta<0?'var(--red)':'var(--text3)',marginBottom:12}}>{delta>=0?'+':''}{delta} vs previous session</div>)}
+              {exHist.length>1?(<div className="chart-card"><div style={{fontSize:11,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',fontWeight:600,marginBottom:12}}>Best per session</div>
+                <div className="bars">{exHist.slice(-10).map((p,i,arr)=>{const max=Math.max(...arr.map(x=>x.best));const h=max?Math.max(8,Math.round(p.best/max*68)):8;const isLast=i===arr.length-1;return(<div key={i} className="bar-col"><span style={{fontSize:9,fontWeight:700,color:isLast?'var(--purple)':'var(--text3)'}}>{p.best}</span><div className="bar" style={{height:h,background:isLast?'var(--purple)':'#5b21b666'}}/><span style={{fontSize:9,color:'var(--text3)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%',textAlign:'center'}}>{p.date.replace(/\s?\d{4}/,'').trim().slice(0,7)}</span></div>);})}
+                </div></div>)
+              :exHist.length===1?(<div className="chart-card" style={{textAlign:'center',padding:24}}><div style={{fontSize:13,color:'var(--text3)'}}>Log more sessions to see your chart</div><div style={{fontSize:36,fontWeight:800,color:'var(--purple)',marginTop:8}}>{exHist[0].best}</div></div>)
+              :(<div className="chart-card" style={{textAlign:'center',padding:24}}><div style={{fontSize:13,color:'var(--text3)'}}>No data yet.</div></div>)}
+              {exHist.length>0&&(<div className="chart-card"><div style={{fontSize:11,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',fontWeight:600,marginBottom:8}}>Last session — {exHist[exHist.length-1].date}</div>
+                {exHist[exHist.length-1].sets.map((s,i)=>(<div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'5px 0',borderBottom:'0.5px solid var(--border)'}}>
+                  <span style={{fontSize:12,color:'var(--text2)'}}>Set {i+1}</span>
+                  <div style={{display:'flex',gap:8,alignItems:'center'}}>{s.band&&s.band!=='Unassisted'&&<span style={{fontSize:10,color:'var(--blue)',background:'#0d1f3c',padding:'2px 7px',borderRadius:10}}>{s.band}</span>}{s.feel&&<span style={{fontSize:10,color:'var(--text3)'}}>{s.feel}</span>}<span style={{fontSize:13,fontWeight:700,color:'var(--green)'}}>{s.val}</span></div>
+                </div>))}
+              </div>)}
+            </>);
+          })()}</div>
+          <div style={{height:40}}/>
+        </>)}
       </div>
-      {restTimer&&(<div className="rest-timer">
-        <div className="rest-circle">{Math.floor(restTimer.rem/60)}:{String(restTimer.rem%60).padStart(2,'0')}</div>
-        <div style={{display:'flex',gap:6,flex:1,flexWrap:'wrap'}}>
-          {[60,90,120,180].map(o=>(<button key={o} className={`rest-opt${restTimer.sel===o?' active':''}`} onClick={()=>setRestSel(o)}>{o===60?'1m':o===90?'1m30':o===120?'2m':'3m'}</button>))}
-        </div>
+      {restTimer&&(<div className="rest-timer"><div className="rest-circle">{Math.floor(restTimer.rem/60)}:{String(restTimer.rem%60).padStart(2,'0')}</div>
+        <div style={{display:'flex',gap:6,flex:1,flexWrap:'wrap'}}>{[60,90,120,180].map(o=>(<button key={o} className={`rest-opt${restTimer.sel===o?' active':''}`} onClick={()=>setRestSel(o)}>{o===60?'1m':o===90?'1m30':o===120?'2m':'3m'}</button>))}</div>
         <button onClick={dismissRest} style={{width:32,height:32,borderRadius:'50%',border:'none',background:'var(--bg3)',color:'var(--text2)',cursor:'pointer',fontSize:16}}>✕</button>
       </div>)}
-
-      {/* Reset modal */}
-      {resetModal&&(<div className="modal-backdrop">
-        <div className="modal">
-          <div className="modal-title">
-            <span style={{display:'flex',alignItems:'center',gap:8}}><Trash2 size={16} style={{color:'var(--red)'}}/>{resetModal==='day'?'Clear day':'Reset week'}</span>
-            <button className="modal-close" onClick={()=>{setResetModal(null);setResetTargetISO(null);}}>✕</button>
-          </div>
-          <div className="modal-sub" style={{marginTop:8}}>
-            {resetModal==='day'
-              ?(`This will permanently delete all logged sets, session data, and training day marker for ${formatDate(resetTargetISO)}.`)
-              :(`This will clear all training days and logged sets for the current week. Session history is preserved. Cannot be undone.`)}
-          </div>
-          <button className="action-btn" style={{background:'var(--red)',marginTop:20}} onClick={()=>resetModal==='day'?clearDay(resetTargetISO):clearWeek()}>
-            {resetModal==='day'?'Clear this day':'Reset current week'}
-          </button>
-          <button className="secondary-btn" onClick={()=>{setResetModal(null);setResetTargetISO(null);}}>Cancel</button>
-        </div>
-      </div>)}
-
+      {resetModal&&(<div className="modal-backdrop"><div className="modal">
+        <div className="modal-title"><span style={{display:'flex',alignItems:'center',gap:8}}><Trash2 size={16} style={{color:'var(--red)'}}/>{resetModal==='day'?'Clear day':'Reset week'}</span><button className="modal-close" onClick={()=>{setResetModal(null);setResetTargetISO(null);}}>✕</button></div>
+        <div className="modal-sub" style={{marginTop:8}}>{resetModal==='day'?(`Permanently delete all logged sets and training day marker for ${formatDate(resetTargetISO)}. Cannot be undone.`):('Clear all training days and logged sets for this week. Session history is preserved.')}</div>
+        <button className="action-btn" style={{background:'var(--red)',marginTop:20}} onClick={()=>resetModal==='day'?clearDay(resetTargetISO):clearWeek()}>{resetModal==='day'?'Clear this day':'Reset current week'}</button>
+        <button className="secondary-btn" onClick={()=>{setResetModal(null);setResetTargetISO(null);}}>Cancel</button>
+      </div></div>)}
       {logModal&&(<div className="modal-backdrop"><div className="modal">
         <div className="modal-title"><span>{activeSS.find(s=>s.id===logModal.ssId)?.[logModal.side]?.name} — Set {logModal.setIdx+1}</span><button className="modal-close" onClick={()=>setLogModal(null)}>✕</button></div>
         <div className="modal-sub">Target: {activeSS.find(s=>s.id===logModal.ssId)?.[logModal.side]?.target} · {activeSS.find(s=>s.id===logModal.ssId)?.[logModal.side]?.band}</div>
         <div className="modal-label">Value (seconds / reps)</div>
         <input className="val-input" type="number" inputMode="decimal" placeholder="0" value={modalVal} onChange={e=>setModalVal(e.target.value)} autoFocus/>
-        <div className="modal-label">Band</div>
-        <div className="band-row">{BANDS.map(b=><button key={b} className={`opt-btn${modalBand===b?' selected':''}`} onClick={()=>setModalBand(b)}>{b}</button>)}</div>
-        <div className="modal-label">Feel</div>
-        <div className="feel-row">{FEEL.map(f=><button key={f} className={`feel-btn${modalFeel===f?' selected':''}`} onClick={()=>setModalFeel(f)}>{f}</button>)}</div>
-        <button className="action-btn green" style={{marginTop:4}} onClick={async()=>{
-          if(!modalVal.trim()) return;
-          const {iso,ssId,side,setIdx}=logModal; const sets=getSets(iso,ssId,side);
-          sets[setIdx]={val:modalVal,band:modalBand,feel:modalFeel,done:true,skipped:false,missed:false};
-          await writeSets(iso,ssId,side,sets); setLogModal(null); startRestTimer();
-        }}>Log Set ✓</button>
-        <button className="secondary-btn" onClick={async()=>{
-          const {iso,ssId,side,setIdx}=logModal; const sets=getSets(iso,ssId,side);
-          sets[setIdx]={val:'',band:'',feel:'',done:false,skipped:true,missed:false};
-          await writeSets(iso,ssId,side,sets); setLogModal(null);
-        }}>Skip set</button>
+        <div className="modal-label">Band</div><div className="band-row">{BANDS.map(b=><button key={b} className={`opt-btn${modalBand===b?' selected':''}`} onClick={()=>setModalBand(b)}>{b}</button>)}</div>
+        <div className="modal-label">Feel</div><div className="feel-row">{FEEL.map(f=><button key={f} className={`feel-btn${modalFeel===f?' selected':''}`} onClick={()=>setModalFeel(f)}>{f}</button>)}</div>
+        <button className="action-btn green" style={{marginTop:4}} onClick={async()=>{ if(!modalVal.trim()) return; const {iso,ssId,side,setIdx}=logModal; const sets=getSets(iso,ssId,side); sets[setIdx]={val:modalVal,band:modalBand,feel:modalFeel,done:true,skipped:false,missed:false}; await writeSets(iso,ssId,side,sets); setLogModal(null); startRestTimer(); }}>Log Set ✓</button>
+        <button className="secondary-btn" onClick={async()=>{ const {iso,ssId,side,setIdx}=logModal; const sets=getSets(iso,ssId,side); sets[setIdx]={val:'',band:'',feel:'',done:false,skipped:true,missed:false}; await writeSets(iso,ssId,side,sets); setLogModal(null); }}>Skip set</button>
       </div></div>)}
       {editModal&&(<div className="modal-backdrop"><div className="modal">
         <div className="modal-title"><span>Edit exercise</span><button className="modal-close" onClick={()=>setEditModal(null)}>✕</button></div>
@@ -618,40 +535,25 @@ export default function App() {
         <div className="modal-label">Name</div><input className="edit-input" value={editName} onChange={e=>setEditName(e.target.value)}/>
         <div className="modal-label">Target</div><input className="edit-input" value={editTarget} onChange={e=>setEditTarget(e.target.value)}/>
         <div className="modal-label">Sets</div><input className="edit-input" type="number" value={editSets} onChange={e=>setEditSets(parseInt(e.target.value)||3)}/>
-        <div className="modal-label">Default band</div>
-        <div className="band-row">{BANDS.map(b=><button key={b} className={`band-edit-btn${editBand===b?' selected':''}`} onClick={()=>setEditBand(b)}>{b}</button>)}</div>
-        <div className="modal-label">Coaching cue</div>
-        <textarea className="edit-textarea" rows={2} value={editCoaching} onChange={e=>setEditCoaching(e.target.value)}/>
-        <div className="modal-label">Video (yt:ID or url:https://…)</div>
-        <input className="edit-input" value={editVideo} onChange={e=>setEditVideo(e.target.value)} placeholder="e.g. yt:dQw4w9WgXcQ"/>
-        <button className="action-btn purple" style={{marginTop:4}} onClick={async()=>{
-          const ov={name:editName,target:editTarget,sets:editSets,band:editBand,coaching:editCoaching};
-          await saveExOverride(editModal.ssId,editModal.side,ov,editVideo); setEditModal(null);
-        }}>Save</button>
+        <div className="modal-label">Default band</div><div className="band-row">{BANDS.map(b=><button key={b} className={`band-edit-btn${editBand===b?' selected':''}`} onClick={()=>setEditBand(b)}>{b}</button>)}</div>
+        <div className="modal-label">Coaching cue</div><textarea className="edit-textarea" rows={2} value={editCoaching} onChange={e=>setEditCoaching(e.target.value)}/>
+        <div className="modal-label">Video (yt:ID or url:https://…)</div><input className="edit-input" value={editVideo} onChange={e=>setEditVideo(e.target.value)} placeholder="e.g. yt:dQw4w9WgXcQ"/>
+        <button className="action-btn purple" style={{marginTop:4}} onClick={async()=>{ const ov={name:editName,target:editTarget,sets:editSets,band:editBand,coaching:editCoaching}; await saveExOverride(editModal.ssId,editModal.side,ov,editVideo); setEditModal(null); }}>Save</button>
       </div></div>)}
       {ssNoteModal&&(<div className="modal-backdrop"><div className="modal">
         <div className="modal-title"><span>{ssNoteModal.label}</span><button className="modal-close" onClick={()=>setSsNoteModal(null)}>✕</button></div>
-        <div style={{height:12}}/>
-        <input className="edit-input" value={ssNoteInput} onChange={e=>setSsNoteInput(e.target.value)} placeholder="Brief description…"/>
+        <div style={{height:12}}/><input className="edit-input" value={ssNoteInput} onChange={e=>setSsNoteInput(e.target.value)} placeholder="Brief description…"/>
         <button className="action-btn purple" style={{marginTop:4}} onClick={async()=>{await saveSsNoteOverride(ssNoteModal.ssId,ssNoteInput);setSsNoteModal(null);}}>Save</button>
       </div></div>)}
       {exNoteModal&&(<div className="modal-backdrop"><div className="modal">
         <div className="modal-title"><span>{activeSS.find(s=>s.id===exNoteModal.ssId)?.[exNoteModal.side]?.name}</span><button className="modal-close" onClick={()=>setExNoteModal(null)}>✕</button></div>
-        <div style={{height:12}}/>
-        <textarea className="note-textarea" value={exNoteInput} onChange={e=>setExNoteInput(e.target.value)} placeholder="Add a note…"/>
+        <div style={{height:12}}/><textarea className="note-textarea" value={exNoteInput} onChange={e=>setExNoteInput(e.target.value)} placeholder="Add a note…"/>
         <button className="action-btn purple" style={{marginTop:12}} onClick={async()=>{await saveExNote(exNoteModal.iso,exNoteModal.ssId,exNoteModal.side,exNoteInput);setExNoteModal(null);}}>Save</button>
       </div></div>)}
       {gateModal&&(<div className="modal-backdrop"><div className="modal">
         <div className="modal-title"><span>Unlogged sets</span><button className="modal-close" onClick={()=>setGateModal(false)}>✕</button></div>
         <div className="modal-sub">These sets haven't been logged. Mark them before saving.</div>
-        <div style={{marginBottom:16}}>
-          {Object.entries(unloggedSets(selectedISO).reduce((acc,u)=>{if(!acc[u.ssLabel])acc[u.ssLabel]=[];acc[u.ssLabel].push(u.name);return acc;},{})).map(([label,names])=>(
-            <div key={label} style={{marginBottom:8}}>
-              <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>{label}</div>
-              {names.map(n=><div key={n} style={{fontSize:13,color:'var(--text2)',padding:'4px 0',borderBottom:'0.5px solid var(--border)'}}>{n}</div>)}
-            </div>
-          ))}
-        </div>
+        <div style={{marginBottom:16}}>{Object.entries(unloggedSets(selectedISO).reduce((acc,u)=>{if(!acc[u.ssLabel])acc[u.ssLabel]=[];acc[u.ssLabel].push(u.name);return acc;},{})).map(([label,names])=>(<div key={label} style={{marginBottom:8}}><div style={{fontSize:11,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>{label}</div>{names.map(n=><div key={n} style={{fontSize:13,color:'var(--text2)',padding:'4px 0',borderBottom:'0.5px solid var(--border)'}}>{n}</div>)}</div>))}</div>
         <button className="action-btn amber" onClick={markAllSkipped} style={{marginTop:4}}>Mark all as skipped</button>
         <button className="secondary-btn" onClick={()=>setGateModal(false)}>Go back and log them</button>
       </div></div>)}
@@ -659,15 +561,11 @@ export default function App() {
         <div className="modal-title"><span>Session saved ✓</span></div>
         <div className="modal-sub">Quick feedback helps track training quality over time.</div>
         <div className="modal-label">How did the session feel?</div>
-        <div style={{display:'flex',gap:6,marginBottom:20}}>
-          {FEEL_LABELS.map((l,i)=>(<button key={l} onClick={()=>setFeedbackFeel(i+1)} style={{flex:1,padding:'10px 4px',borderRadius:8,border:`1.5px solid ${feedbackFeel===i+1?'var(--purple)':'var(--border2)'}`,background:feedbackFeel===i+1?'var(--purple)':'transparent',color:feedbackFeel===i+1?'#fff':'var(--text2)',fontSize:10,fontWeight:600,cursor:'pointer',textAlign:'center'}}>{i+1}<br/><span style={{fontSize:9,fontWeight:400}}>{l}</span></button>))}
-        </div>
+        <div style={{display:'flex',gap:6,marginBottom:20}}>{FEEL_LABELS.map((l,i)=>(<button key={l} onClick={()=>setFeedbackFeel(i+1)} style={{flex:1,padding:'10px 4px',borderRadius:8,border:`1.5px solid ${feedbackFeel===i+1?'var(--purple)':'var(--border2)'}`,background:feedbackFeel===i+1?'var(--purple)':'transparent',color:feedbackFeel===i+1?'#fff':'var(--text2)',fontSize:10,fontWeight:600,cursor:'pointer',textAlign:'center'}}>{i+1}<br/><span style={{fontSize:9,fontWeight:400}}>{l}</span></button>))}</div>
         <div className="modal-label">Physical flags (optional)</div>
         <textarea className="note-textarea" rows={2} style={{marginBottom:16}} placeholder="e.g. right elbow on FL pull-ups" value={feedbackFlags} onChange={e=>setFeedbackFlags(e.target.value)}/>
         <div className="modal-label">Session number this week</div>
-        <div style={{display:'flex',gap:8,marginBottom:20}}>
-          {[1,2,3].map(n=>(<button key={n} onClick={()=>setFeedbackSessionNum(n)} style={{flex:1,padding:12,borderRadius:8,border:`1.5px solid ${feedbackSessionNum===n?'var(--purple)':'var(--border2)'}`,background:feedbackSessionNum===n?'#1a0f3c':'transparent',color:feedbackSessionNum===n?'var(--purple)':'var(--text2)',fontSize:14,fontWeight:700,cursor:'pointer'}}>{n}</button>))}
-        </div>
+        <div style={{display:'flex',gap:8,marginBottom:20}}>{[1,2,3].map(n=>(<button key={n} onClick={()=>setFeedbackSessionNum(n)} style={{flex:1,padding:12,borderRadius:8,border:`1.5px solid ${feedbackSessionNum===n?'var(--purple)':'var(--border2)'}`,background:feedbackSessionNum===n?'#1a0f3c':'transparent',color:feedbackSessionNum===n?'var(--purple)':'var(--text2)',fontSize:14,fontWeight:700,cursor:'pointer'}}>{n}</button>))}</div>
         <button className="action-btn green" onClick={saveFeedback}>Done</button>
       </div></div>)}
     </div>
