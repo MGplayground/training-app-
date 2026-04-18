@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Pencil, Plus } from 'lucide-react';
+import { Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import {
   INIT_SS, REHAB_SS, BANDS, FEEL, FEEL_LABELS, FEEL_SCORE, DAYS,
@@ -15,8 +15,13 @@ function getWeekDates() {
   const mon = new Date(now); mon.setDate(now.getDate() - (dow === 0 ? 6 : dow - 1));
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(mon); d.setDate(mon.getDate() + i);
-    return { label: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][i], date: d.getDate(), iso: d.toISOString().split('T')[0], full: d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) };
+    return { label: DAYS[i], date: d.getDate(), iso: d.toISOString().split('T')[0], full: d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }) };
   });
+}
+function getWeekMonday() {
+  const now = new Date(); const dow = now.getDay();
+  const mon = new Date(now); mon.setDate(now.getDate() - (dow === 0 ? 6 : dow - 1));
+  return mon.toISOString().split('T')[0];
 }
 function VideoSlot({ videoUrl, editHint = 'Edit exercise to add a video.' }) {
   if (!videoUrl) return (<div className="video-placeholder" title={editHint}><span className="video-placeholder-icon">▶</span><span className="video-placeholder-label">No video — add via edit</span></div>);
@@ -46,6 +51,8 @@ export default function App() {
   const [exNoteModal, setExNoteModal] = useState(null);
   const [gateModal, setGateModal] = useState(false);
   const [feedbackModal, setFeedbackModal] = useState(null);
+  const [resetModal, setResetModal] = useState(null); // null | 'day' | 'week'
+  const [resetTargetISO, setResetTargetISO] = useState(null);
   const [modalVal, setModalVal] = useState('');
   const [modalBand, setModalBand] = useState('');
   const [modalFeel, setModalFeel] = useState('');
@@ -69,6 +76,7 @@ export default function App() {
   const noteBufferRef = useRef({});
   const [loading, setLoading] = useState(true);
   const recIntervalsRef = useRef({});
+  const longPressRef = useRef(null);
 
   useEffect(() => {
     async function loadAll() {
@@ -123,13 +131,8 @@ export default function App() {
     activeSS.forEach(ss => ['push','pull'].forEach(side => getSets(iso,ss.id,side).forEach(s => { t++; if (isActioned(s)) d++; })));
     return { decided:d, total:t, pct: t ? Math.round(d/t*100) : 0 };
   }
-  function doneSetsCount(iso) {
-    let n=0; activeSS.forEach(ss => ['push','pull'].forEach(side => getSets(iso,ss.id,side).forEach(s => { if(s.done) n++; }))); return n;
-  }
-  function ssDone(iso,ssId) {
-    const ss = activeSS.find(s=>s.id===ssId); if(!ss) return false;
-    return !['push','pull'].some(side => getSets(iso,ss.id,side).some(s => !isActioned(s)));
-  }
+  function doneSetsCount(iso) { let n=0; activeSS.forEach(ss => ['push','pull'].forEach(side => getSets(iso,ss.id,side).forEach(s => { if(s.done) n++; }))); return n; }
+  function ssDone(iso,ssId) { const ss = activeSS.find(s=>s.id===ssId); if(!ss) return false; return !['push','pull'].some(side => getSets(iso,ss.id,side).some(s => !isActioned(s))); }
   function hasData(iso) { const dl=logs[iso]; if(!dl) return false; return Object.values(dl).some(sets => Array.isArray(sets) && sets.some(s => isActioned(s))); }
   function getSSnote(ss) { return ssNoteOverrides[ss.id] !== undefined ? ssNoteOverrides[ss.id] : ss.note; }
   function getExVideo(ssId,side) { const k=`${ssId}_${side}`; if(videoOverrides[k]!==undefined) return videoOverrides[k]; return activeSS.find(s=>s.id===ssId)?.[side]?.video||null; }
@@ -149,6 +152,49 @@ export default function App() {
     await supabase.from('programme').upsert({ss_id:ssId,side,overrides:ov,video_url:videoVal||null},{onConflict:'ss_id,side'});
   }
   async function saveSsNoteOverride(ssId,note) { setSsNoteOverrides(p=>({...p,[ssId]:note})); await supabase.from('programme').upsert({ss_id:ssId,side:'note',overrides:{note}},{onConflict:'ss_id,side'}); }
+
+  // ── RESET FUNCTIONS ──────────────────────────────────────────────
+  async function clearDay(iso) {
+    // Delete all data for a specific day
+    await Promise.all([
+      supabase.from('session_logs').delete().eq('iso_date', iso),
+      supabase.from('session_history').delete().eq('iso_date', iso),
+      supabase.from('session_notes').delete().eq('iso_date', iso),
+      supabase.from('training_days').delete().eq('iso_date', iso),
+    ]);
+    // Update local state
+    setLogs(p => { const n = {...p}; delete n[iso]; return n; });
+    setHistory(p => p.filter(h => h.iso_date !== iso));
+    setSessionNotes(p => { const n = {...p}; delete n[iso]; return n; });
+    setTrainingDays(p => { const n = new Set(p); n.delete(iso); return n; });
+    setResetModal(null); setResetTargetISO(null);
+  }
+  async function clearWeek() {
+    const isos = getWeekDates().map(d => d.iso);
+    await Promise.all(isos.flatMap(iso => [
+      supabase.from('session_logs').delete().eq('iso_date', iso),
+      supabase.from('session_history').delete().eq('iso_date', iso),
+      supabase.from('session_notes').delete().eq('iso_date', iso),
+      supabase.from('training_days').delete().eq('iso_date', iso),
+    ]));
+    setLogs(p => { const n = {...p}; isos.forEach(iso => delete n[iso]); return n; });
+    setHistory(p => p.filter(h => !isos.includes(h.iso_date)));
+    setSessionNotes(p => { const n = {...p}; isos.forEach(iso => delete n[iso]); return n; });
+    setTrainingDays(new Set());
+    setResetModal(null);
+  }
+
+  // Long press on day button to trigger day reset
+  function onDayPressStart(iso) {
+    longPressRef.current = setTimeout(() => {
+      if (hasData(iso) || trainingDays.has(iso)) {
+        setResetTargetISO(iso);
+        setResetModal('day');
+      }
+    }, 600);
+  }
+  function onDayPressEnd() { clearTimeout(longPressRef.current); }
+
   function attemptSave(iso) { const note=noteBufferRef.current[iso]; if(note!==undefined) flushNote(iso); if(unloggedSets(iso).length>0){setGateModal(true);return;} doSave(iso); }
   async function markAllSkipped() {
     const iso=selectedISO; const ul=unloggedSets(iso);
@@ -235,6 +281,7 @@ export default function App() {
         <span className="header-title">Cali Training</span>
         <div className="header-actions">
           {activeTab==='session'&&isTraining&&doneSetsCount(selectedISO)>0&&(<button className="save-btn-header" onClick={()=>attemptSave(selectedISO)}>Save session</button>)}
+          <button className="icon-btn" title="Reset week" onClick={()=>setResetModal('week')} style={{opacity:0.45}}><RotateCcw size={14}/></button>
           <button className="icon-btn" style={{opacity:rehabOn?1:0.45,color:rehabOn?'var(--red)':'var(--text2)',background:rehabOn?'var(--red-bg)':'var(--bg3)'}} onClick={()=>setRehabOn(v=>!v)} title="Toggle rehab"><Plus size={14}/></button>
         </div>
       </header>
@@ -246,11 +293,22 @@ export default function App() {
           <>
             <div className="week-strip">
               {weekDates.map(d=>{
-                const isSel=d.iso===selectedISO,isTrain=trainingDays.has(d.iso);
-                return(<button key={d.iso} className={`day-btn${isSel?' active':isTrain?' training':''}`} onClick={()=>{setSelectedISO(d.iso);setOpenSS(null);}}>
-                  <span className="day-name">{d.label}</span><span className="day-num">{d.date}</span>
-                  <span className={`day-dot${hasData(d.iso)||isTrain?' show':''}`}/>
-                </button>);
+                const isSel=d.iso===selectedISO,isTrain=trainingDays.has(d.iso),hasD=hasData(d.iso);
+                return(
+                  <button key={d.iso}
+                    className={`day-btn${isSel?' active':isTrain?' training':''}`}
+                    onClick={()=>{setSelectedISO(d.iso);setOpenSS(null);}}
+                    onMouseDown={()=>onDayPressStart(d.iso)}
+                    onMouseUp={onDayPressEnd}
+                    onMouseLeave={onDayPressEnd}
+                    onTouchStart={()=>onDayPressStart(d.iso)}
+                    onTouchEnd={onDayPressEnd}
+                  >
+                    <span className="day-name">{d.label}</span>
+                    <span className="day-num">{d.date}</span>
+                    <span className={`day-dot${hasD||isTrain?' show':''}`}/>
+                  </button>
+                );
               })}
             </div>
             {!isTraining?(
@@ -473,21 +531,19 @@ export default function App() {
                     ))}
                   </div>
                   {delta!==null&&(<div style={{fontSize:12,fontWeight:600,color:delta>0?'var(--green)':delta<0?'var(--red)':'var(--text3)',marginBottom:12}}>{delta>=0?'+':''}{delta} vs previous session</div>)}
-                  {exHist.length>1?(
-                    <div className="chart-card">
-                      <div style={{fontSize:11,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',fontWeight:600,marginBottom:12}}>Best per session</div>
-                      <div className="bars">
-                        {exHist.slice(-10).map((p,i,arr)=>{
-                          const max=Math.max(...arr.map(x=>x.best)); const h=max?Math.max(8,Math.round(p.best/max*68)):8; const isLast=i===arr.length-1;
-                          return(<div key={i} className="bar-col">
-                            <span style={{fontSize:9,fontWeight:700,color:isLast?'var(--purple)':'var(--text3)'}}>{p.best}</span>
-                            <div className="bar" style={{height:h,background:isLast?'var(--purple)':'#5b21b666'}}/>
-                            <span style={{fontSize:9,color:'var(--text3)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%',textAlign:'center'}}>{p.date.replace(/\s?\d{4}/,'').trim().slice(0,7)}</span>
-                          </div>);
-                        })}
-                      </div>
+                  {exHist.length>1?(<div className="chart-card">
+                    <div style={{fontSize:11,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',fontWeight:600,marginBottom:12}}>Best per session</div>
+                    <div className="bars">
+                      {exHist.slice(-10).map((p,i,arr)=>{
+                        const max=Math.max(...arr.map(x=>x.best)); const h=max?Math.max(8,Math.round(p.best/max*68)):8; const isLast=i===arr.length-1;
+                        return(<div key={i} className="bar-col">
+                          <span style={{fontSize:9,fontWeight:700,color:isLast?'var(--purple)':'var(--text3)'}}>{p.best}</span>
+                          <div className="bar" style={{height:h,background:isLast?'var(--purple)':'#5b21b666'}}/>
+                          <span style={{fontSize:9,color:'var(--text3)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%',textAlign:'center'}}>{p.date.replace(/\s?\d{4}/,'').trim().slice(0,7)}</span>
+                        </div>);
+                      })}
                     </div>
-                  ):exHist.length===1?(
+                  </div>):exHist.length===1?(
                     <div className="chart-card" style={{textAlign:'center',padding:24}}><div style={{fontSize:13,color:'var(--text3)'}}>Log more sessions to see your chart</div><div style={{fontSize:36,fontWeight:800,color:'var(--purple)',marginTop:8}}>{exHist[0].best}</div></div>
                   ):(<div className="chart-card" style={{textAlign:'center',padding:24}}><div style={{fontSize:13,color:'var(--text3)'}}>No data yet.</div></div>)}
                   {exHist.length>0&&(<div className="chart-card">
@@ -515,6 +571,26 @@ export default function App() {
         </div>
         <button onClick={dismissRest} style={{width:32,height:32,borderRadius:'50%',border:'none',background:'var(--bg3)',color:'var(--text2)',cursor:'pointer',fontSize:16}}>✕</button>
       </div>)}
+
+      {/* Reset modal */}
+      {resetModal&&(<div className="modal-backdrop">
+        <div className="modal">
+          <div className="modal-title">
+            <span style={{display:'flex',alignItems:'center',gap:8}}><Trash2 size={16} style={{color:'var(--red)'}}/>{resetModal==='day'?'Clear day':'Reset week'}</span>
+            <button className="modal-close" onClick={()=>{setResetModal(null);setResetTargetISO(null);}}>✕</button>
+          </div>
+          <div className="modal-sub" style={{marginTop:8}}>
+            {resetModal==='day'
+              ?(`This will permanently delete all logged sets, session data, and training day marker for ${formatDate(resetTargetISO)}.`)
+              :(`This will clear all training days and logged sets for the current week. Session history is preserved. Cannot be undone.`)}
+          </div>
+          <button className="action-btn" style={{background:'var(--red)',marginTop:20}} onClick={()=>resetModal==='day'?clearDay(resetTargetISO):clearWeek()}>
+            {resetModal==='day'?'Clear this day':'Reset current week'}
+          </button>
+          <button className="secondary-btn" onClick={()=>{setResetModal(null);setResetTargetISO(null);}}>Cancel</button>
+        </div>
+      </div>)}
+
       {logModal&&(<div className="modal-backdrop"><div className="modal">
         <div className="modal-title"><span>{activeSS.find(s=>s.id===logModal.ssId)?.[logModal.side]?.name} — Set {logModal.setIdx+1}</span><button className="modal-close" onClick={()=>setLogModal(null)}>✕</button></div>
         <div className="modal-sub">Target: {activeSS.find(s=>s.id===logModal.ssId)?.[logModal.side]?.target} · {activeSS.find(s=>s.id===logModal.ssId)?.[logModal.side]?.band}</div>
