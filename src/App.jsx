@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { supabase } from './supabaseClient';
+import { v4 as uuidv4 } from 'uuid'; // Let's assume uuid is not installed, we can just use crypto.randomUUID or a simple random string for id.
 import {
   INIT_SS, REHAB_SS, BANDS, FEEL, FEEL_LABELS, FEEL_SCORE, DAYS,
   RECOVERY, RECOVERY_EXTRAS,
@@ -117,7 +118,7 @@ export default function App() {
           supabase.from('session_notes').select('*'),
           supabase.from('exercise_notes').select('*'),
           supabase.from('session_history').select('*').order('saved_at', { ascending: true }),
-          supabase.from('programme').select('*'),
+          supabase.from('active_programme').select('*').eq('id', '11111111-1111-1111-1111-111111111111').single(),
         ]);
 
         let rawLogs = {};
@@ -134,23 +135,24 @@ export default function App() {
         if (snData) { const m = {}; snData.forEach(r => { m[r.iso_date] = r.note; }); setSessionNotes(m); }
         if (enData) { const m = {}; enData.forEach(r => { m[r.note_key] = r.note; }); setExNotes(m); }
         if (histData) setHistory(histData);
-        if (progData) {
-          const exOv = {}, vidOv = {}, ssNoteOv = {};
-          progData.forEach(r => {
-            const k = `${r.ss_id}_${r.side}`;
-            if (r.overrides) exOv[k] = r.overrides;
-            if (r.video_url) vidOv[k] = r.video_url;
-            if (r.side === 'note') ssNoteOv[r.ss_id] = r.overrides?.note || '';
-          });
-          setExOverrides(exOv); setVideoOverrides(vidOv); setSsNoteOverrides(ssNoteOv);
-          const fresh = JSON.parse(JSON.stringify(INIT_SS));
-          Object.entries(exOv).forEach(([key, ov]) => { const [sid, side] = key.split('_'); const ss = fresh.find(s => s.id === sid); if (ss && ss[side]) Object.assign(ss[side], ov); });
-          setSupersets(fresh);
+        
+        if (progData && progData.payload && progData.payload.length > 0) {
+           setSupersets(progData.payload);
+        } else {
+           // Seed database on first load
+           const seed = JSON.parse(JSON.stringify(INIT_SS));
+           setSupersets(seed);
+           await supabase.from('active_programme').upsert({ id: '11111111-1111-1111-1111-111111111111', payload: seed });
         }
       } catch(e) { console.error('Load error:', e); } finally { setLoading(false); }
     }
     loadAll();
   }, []);
+
+  async function syncProgramme(newSupersets) {
+     setSupersets(newSupersets);
+     await supabase.from('active_programme').upsert({ id: '11111111-1111-1111-1111-111111111111', payload: newSupersets });
+  }
 
   const activeSS = rehabOn ? [...supersets, REHAB_SS] : [...supersets];
   function getSets(iso, ssId, side) {
@@ -186,12 +188,17 @@ export default function App() {
   async function flushNote(iso) { const note=noteBufferRef.current[iso]; if(note===undefined) return; setSessionNotes(p=>({...p,[iso]:note})); await supabase.from('session_notes').upsert({iso_date:iso,note},{onConflict:'iso_date'}); }
   async function saveExNote(iso,ssId,side,note) { const k=`${iso}_${ssId}_${side}`; setExNotes(p=>({...p,[k]:note})); await supabase.from('exercise_notes').upsert({note_key:k,note},{onConflict:'note_key'}); }
   async function saveExOverride(ssId,side,ov,videoVal) {
-    const k=`${ssId}_${side}`; const eOv={...exOverrides,[k]:ov}; const vOv={...videoOverrides,[k]:videoVal||null};
-    setExOverrides(eOv); setVideoOverrides(vOv);
-    const fresh=JSON.parse(JSON.stringify(INIT_SS)); Object.entries(eOv).forEach(([key,o])=>{ const [sid,s]=key.split('_'); const ss=fresh.find(x=>x.id===sid); if(ss&&ss[s]) Object.assign(ss[s],o); }); setSupersets(fresh);
-    await supabase.from('programme').upsert({ss_id:ssId,side,overrides:ov,video_url:videoVal||null},{onConflict:'ss_id,side'});
+    const fresh=JSON.parse(JSON.stringify(supersets)); 
+    const ss=fresh.find(x=>x.id===ssId); 
+    if(ss&&ss[side]) { Object.assign(ss[side],ov); ss[side].video = videoVal||null; }
+    await syncProgramme(fresh);
   }
-  async function saveSsNoteOverride(ssId,note) { setSsNoteOverrides(p=>({...p,[ssId]:note})); await supabase.from('programme').upsert({ss_id:ssId,side:'note',overrides:{note}},{onConflict:'ss_id,side'}); }
+  async function saveSsNoteOverride(ssId,note) { 
+    const fresh=JSON.parse(JSON.stringify(supersets)); 
+    const ss=fresh.find(x=>x.id===ssId); 
+    if(ss) ss.note = note;
+    await syncProgramme(fresh);
+  }
 
   async function clearDay(iso) {
     await Promise.all([
@@ -319,7 +326,7 @@ export default function App() {
         </div>
       </header>
       <div className="tabs">
-        {['session','history','progress'].map(t=>(<button key={t} className={`tab${activeTab===t?' active':''}`} onClick={()=>setActiveTab(t)}>{t.charAt(0).toUpperCase()+t.slice(1)}</button>))}
+        {['session','history','progress','builder'].map(t=>(<button key={t} className={`tab${activeTab===t?' active':''}`} onClick={()=>setActiveTab(t)}>{t.charAt(0).toUpperCase()+t.slice(1)}</button>))}
       </div>
       <div className="scroll">
         {activeTab==='session'&&(<>
@@ -506,6 +513,37 @@ export default function App() {
               </div>)}
             </>);
           })()}</div>
+          <div style={{height:40}}/>
+        </>)}
+        {activeTab==='builder'&&(<>
+          <div style={{padding:'16px'}}>
+            <div style={{fontSize:18,fontWeight:800,marginBottom:16,color:'var(--purple)'}}>Programme Builder</div>
+            {supersets.map((ss,i)=>(
+              <div key={ss.id} className="ss-card" style={{padding:'12px',marginBottom:'12px'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}}>
+                  <div style={{fontWeight:700,fontSize:14}}>{ss.label}</div>
+                  <div style={{display:'flex',gap:8}}>
+                    <button className="btn-icon" disabled={i===0} onClick={()=>{const a=[...supersets];[a[i],a[i-1]]=[a[i-1],a[i]];syncProgramme(a);}}>&#8593;</button>
+                    <button className="btn-icon" disabled={i===supersets.length-1} onClick={()=>{const a=[...supersets];[a[i],a[i+1]]=[a[i+1],a[i]];syncProgramme(a);}}>&#8595;</button>
+                    <button className="btn-icon" onClick={()=>{const a=supersets.filter(x=>x.id!==ss.id);syncProgramme(a);}}><Trash2 size={14} color="var(--red)"/></button>
+                  </div>
+                </div>
+                <div style={{fontSize:12,color:'var(--text2)',display:'flex',justifyContent:'space-between',marginBottom:'4px'}}>
+                  <span>Push: {ss.push?.name}</span>
+                  <button className="btn-icon" onClick={()=>openEditModal(ss.id,'push')}><Pencil size={12}/></button>
+                </div>
+                <div style={{fontSize:12,color:'var(--text2)',display:'flex',justifyContent:'space-between'}}>
+                  <span>Pull: {ss.pull?.name}</span>
+                  <button className="btn-icon" onClick={()=>openEditModal(ss.id,'pull')}><Pencil size={12}/></button>
+                </div>
+              </div>
+            ))}
+            <button className="action-btn purple" style={{marginTop:'16px'}} onClick={()=>{
+              const newId = 'ss' + Math.random().toString(36).substring(7);
+              const newSS = { id: newId, label: 'New Superset', note: '', push: { name: 'New Push', sets: 3, target: '5 reps', band: 'Unassisted', role: 'Main', coaching: '', video: null }, pull: { name: 'New Pull', sets: 3, target: '5 reps', band: 'Unassisted', role: 'Main', coaching: '', video: null } };
+              syncProgramme([...supersets, newSS]);
+            }}>+ Add New Superset</button>
+          </div>
           <div style={{height:40}}/>
         </>)}
       </div>
