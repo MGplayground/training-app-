@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { supabase } from './supabaseClient';
-import { v4 as uuidv4 } from 'uuid'; // Let's assume uuid is not installed, we can just use crypto.randomUUID or a simple random string for id.
 import {
   INIT_SS, REHAB_SS, BANDS, FEEL, FEEL_LABELS, FEEL_SCORE, DAYS,
   RECOVERY, RECOVERY_EXTRAS,
