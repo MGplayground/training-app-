@@ -1,10 +1,25 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { Pencil, Plus, RotateCcw, Trash2, Check } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import {
-  INIT_SS, REHAB_SS, BANDS, FEEL, FEEL_LABELS, FEEL_SCORE, DAYS,
+  INIT_SS, REHAB_SS, ASSIST_LEVELS, FEEL_LABELS, DAYS,
   RECOVERY, RECOVERY_EXTRAS,
 } from './data';
+
+function Face({ type, active, onClick }) {
+  const faces = {
+    4: { color: 'var(--green)', path: 'M9 12a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm6 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-3 5.5c-2.5 0-4.5-1.5-5.5-3h11c-1 1.5-3 3-5.5 3zM12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z' },
+    3: { color: 'var(--amber)', path: 'M9 12a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm6 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-6 4h6v1.5H9V16zM12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z' },
+    2: { color: '#f97316',      path: 'M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zm7 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM12 17c-2 0-3.5-1-4-2l1.5-1c.5 1 1.5 1.5 2.5 1.5s2-.5 2.5-1.5l1.5 1c-.5 1-2 2-4 2zM12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z' },
+    1: { color: 'var(--red)',   path: 'M8 11.5l2-1.5-2-1.5v3zm6 0l-2-1.5 2-1.5v3zM12 14c-1.5 0-2.5 1-2.5 2h5c0-1-1-2-2.5-2zM12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z' }
+  };
+  const f = faces[type];
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke={active ? f.color : 'var(--border2)'} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" onClick={onClick} style={{ width: 22, height: 22, cursor: 'pointer', flexShrink: 0, transition: 'stroke 0.2s', ...(!active&&{opacity:0.6}) }}>
+      <path d={f.path} />
+    </svg>
+  );
+}
 
 function todayISO() { return new Date().toISOString().split('T')[0]; }
 function formatDate(iso) {
@@ -46,7 +61,6 @@ export default function App() {
   const [openSS, setOpenSS] = useState(null);
   const [expandedSession, setExpandedSession] = useState(null);
   const [selectedExKey, setSelectedExKey] = useState('ss1_push');
-  const [logModal, setLogModal] = useState(null);
   const [editModal, setEditModal] = useState(null);
   const [ssNoteModal, setSsNoteModal] = useState(null);
   const [exNoteModal, setExNoteModal] = useState(null);
@@ -54,13 +68,11 @@ export default function App() {
   const [feedbackModal, setFeedbackModal] = useState(null);
   const [resetModal, setResetModal] = useState(null);
   const [resetTargetISO, setResetTargetISO] = useState(null);
-  const [modalVal, setModalVal] = useState('');
-  const [modalBand, setModalBand] = useState('');
-  const [modalFeel, setModalFeel] = useState('');
   const [editName, setEditName] = useState('');
   const [editTarget, setEditTarget] = useState('');
   const [editSets, setEditSets] = useState(3);
-  const [editBand, setEditBand] = useState('');
+  const [editAssist, setEditAssist] = useState(100);
+  const [editWeighted, setEditWeighted] = useState(false);
   const [editCoaching, setEditCoaching] = useState('');
   const [editVideo, setEditVideo] = useState('');
   const [ssNoteInput, setSsNoteInput] = useState('');
@@ -121,7 +133,12 @@ export default function App() {
         ]);
 
         let rawLogs = {};
-        if (logsData) { logsData.forEach(r => { if (!rawLogs[r.iso_date]) rawLogs[r.iso_date] = {}; rawLogs[r.iso_date][`${r.ss_id}_${r.side}`] = r.sets; }); }
+        const storedLocalLogs = localStorage.getItem('cali_logs_draft');
+        if (storedLocalLogs) {
+          try { rawLogs = JSON.parse(storedLocalLogs); } catch(e){}
+        } else if (logsData) {
+          logsData.forEach(r => { if (!rawLogs[r.iso_date]) rawLogs[r.iso_date] = {}; rawLogs[r.iso_date][`${r.ss_id}_${r.side}`] = r.sets; });
+        }
 
         let rawTD = new Set();
         if (tdData) rawTD = new Set(tdData.map(r => r.iso_date));
@@ -157,7 +174,7 @@ export default function App() {
   function getSets(iso, ssId, side) {
     const ss = activeSS.find(s => s.id === ssId); if (!ss) return [];
     const ex = ss[side]; const stored = logs[iso]?.[`${ssId}_${side}`];
-    const blank = () => ({ val:'', band: ex.band, feel:'', done:false, skipped:false, missed:false });
+    const blank = () => ({ val:'', assist: ex.assist||100, feel:null, done:false, skipped:false, missed:false, ...(ex.isWeighted && { weight: '' }) });
     if (!stored || !Array.isArray(stored)) return Array.from({ length: ex.sets }, blank);
     return Array.from({ length: ex.sets }, (_, i) => stored[i] ?? blank());
   }
@@ -179,7 +196,9 @@ export default function App() {
   function getExVideo(ssId,side) { const k=`${ssId}_${side}`; if(videoOverrides[k]!==undefined) return videoOverrides[k]; return activeSS.find(s=>s.id===ssId)?.[side]?.video||null; }
 
   async function writeSets(iso,ssId,side,sets) {
-    const next={...logs}; if(!next[iso]) next[iso]={}; next[iso][`${ssId}_${side}`]=sets; setLogs(next);
+    const next={...logs}; if(!next[iso]) next[iso]={}; next[iso][`${ssId}_${side}`]=sets; 
+    setLogs(next);
+    localStorage.setItem('cali_logs_draft', JSON.stringify(next));
     await supabase.from('session_logs').upsert({ iso_date:iso, ss_id:ssId, side, sets, updated_at:new Date().toISOString() },{ onConflict:'iso_date,ss_id,side' });
   }
   async function markTrainingDay(iso) { const n=new Set(trainingDays); n.add(iso); setTrainingDays(n); await supabase.from('training_days').upsert({ iso_date:iso }); }
@@ -206,7 +225,7 @@ export default function App() {
       supabase.from('session_notes').delete().eq('iso_date', iso),
       supabase.from('training_days').delete().eq('iso_date', iso),
     ]);
-    setLogs(p => { const n = {...p}; delete n[iso]; return n; });
+    setLogs(p => { const n = {...p}; delete n[iso]; localStorage.setItem('cali_logs_draft', JSON.stringify(n)); return n; });
     setHistory(p => p.filter(h => h.iso_date !== iso));
     setSessionNotes(p => { const n = {...p}; delete n[iso]; return n; });
     setTrainingDays(p => { const n = new Set(p); n.delete(iso); return n; });
@@ -220,7 +239,7 @@ export default function App() {
       supabase.from('session_notes').delete().eq('iso_date', iso),
       supabase.from('training_days').delete().eq('iso_date', iso),
     ]));
-    setLogs(p => { const n = {...p}; isos.forEach(iso => delete n[iso]); return n; });
+    setLogs(p => { const n = {...p}; isos.forEach(iso => delete n[iso]); localStorage.setItem('cali_logs_draft', JSON.stringify(n)); return n; });
     setHistory(p => p.filter(h => !isos.includes(h.iso_date)));
     setSessionNotes(p => { const n = {...p}; isos.forEach(iso => delete n[iso]); return n; });
     setTrainingDays(new Set());
@@ -237,7 +256,7 @@ export default function App() {
   function attemptSave(iso) { const note=noteBufferRef.current[iso]; if(note!==undefined) flushNote(iso); if(unloggedSets(iso).length>0){setGateModal(true);return;} doSave(iso); }
   async function markAllSkipped() {
     const iso=selectedISO; const ul=unloggedSets(iso);
-    for(const {ssId,side,idx} of ul) { const s=getSets(iso,ssId,side); s[idx]={val:'',band:'',feel:'',done:false,skipped:true,missed:false}; await writeSets(iso,ssId,side,s); }
+    for(const {ssId,side,idx} of ul) { const s=getSets(iso,ssId,side); s[idx]={val:'',assist:100,feel:null,done:false,skipped:true,missed:false}; await writeSets(iso,ssId,side,s); }
     setGateModal(false); doSave(iso);
   }
   async function doSave(iso) {
@@ -246,6 +265,7 @@ export default function App() {
     const idx=history.findIndex(h=>h.iso_date===iso); const nh=[...history];
     if(idx>=0) nh[idx]={...nh[idx],...entry}; else nh.push(entry);
     setHistory(nh); await supabase.from('session_history').upsert(entry,{onConflict:'iso_date'});
+    localStorage.removeItem('cali_logs_draft');
     setFeedbackModal(iso); setFeedbackFeel(0); setFeedbackFlags(''); setFeedbackSessionNum(0);
   }
   async function saveFeedback() {
@@ -281,11 +301,11 @@ export default function App() {
   const focusData=useCallback(()=>{
     const last=history.length?history[history.length-1]:null; if(!last) return{type:'default',exercise:null};
     let pt=0,pc=0,lt=0,lc=0;
-    Object.entries(last.log||{}).forEach(([k,sets])=>(sets||[]).filter(s=>s?.done).forEach(s=>{const sc=FEEL_SCORE[s.feel]??3;if(k.endsWith('_push')){pt+=sc;pc++;}if(k.endsWith('_pull')){lt+=sc;lc++;}}));
+    Object.entries(last.log||{}).forEach(([k,sets])=>(sets||[]).filter(s=>s?.done).forEach(s=>{const sc=s.feel||3;if(k.endsWith('_push')){pt+=sc;pc++;}if(k.endsWith('_pull')){lt+=sc;lc++;}}));
     const pa=pc?pt/pc:3,la=lc?lt/lc:3;
     if(pa>=3&&la>=3) return{type:'default',exercise:null};
     const side=pa<la?'push':'pull'; let worst='',ws=99;
-    Object.entries(last.log||{}).forEach(([k,sets])=>{ if(!k.endsWith('_'+side)) return; const d=(sets||[]).filter(s=>s?.done); const avg=d.length?d.reduce((a,s)=>a+(FEEL_SCORE[s.feel]??3),0)/d.length:3; if(avg<ws){ws=avg;worst=k;} });
+    Object.entries(last.log||{}).forEach(([k,sets])=>{ if(!k.endsWith('_'+side)) return; const d=(sets||[]).filter(s=>s?.done); const avg=d.length?d.reduce((a,s)=>a+(s.feel||3),0)/d.length:3; if(avg<ws){ws=avg;worst=k;} });
     const EN={ss1_push:'Full planche hold',ss1_pull:'Front lever touch',ss3_push:'Straddle planche press',ss3_pull:'FL pull-ups'};
     return{type:side,exercise:worst?(EN[worst]||worst):null};
   },[history]);
@@ -308,7 +328,7 @@ export default function App() {
   function totalSetsDone(ssId,side) { return history.reduce((acc,sess)=>acc+((sess.log??{})[`${ssId}_${side}`]??[]).filter(s=>s?.done).length,0); }
   function openEditModal(ssId,side) {
     const ss=activeSS.find(s=>s.id===ssId); const ex=ss[side];
-    setEditName(ex.name);setEditTarget(ex.target);setEditSets(ex.sets);setEditBand(ex.band);setEditCoaching(ex.coaching);setEditVideo(getExVideo(ssId,side)||'');setEditModal({ssId,side});
+    setEditName(ex.name);setEditTarget(ex.target);setEditSets(ex.sets);setEditAssist(ex.assist||100);setEditWeighted(ex.isWeighted||false);setEditCoaching(ex.coaching);setEditVideo(getExVideo(ssId,side)||'');setEditModal({ssId,side});
   }
   if(loading) return(<div style={{background:'#0a0a0a',height:'100vh',display:'flex',alignItems:'center',justifyContent:'center',color:'#7c3aed',fontFamily:'system-ui',fontSize:14}}>Loading…</div>);
   const isTraining=trainingDays.has(selectedISO);
@@ -411,20 +431,62 @@ export default function App() {
                       return(<div key={side}>
                         {si===1&&<div className="ex-divider"/>}
                         <div className="ex-block">
-                          <div className="ex-top"><span className="ex-name">{ex.name}</span>
-                            <div style={{display:'flex',gap:6,alignItems:'center'}}><span className="ex-role">{ex.role}</span><button className="btn-icon" onClick={e=>{e.stopPropagation();openEditModal(ss.id,side);}} title="Edit"><Pencil size={13}/></button></div>
+                          <div className="ex-top">
+                            <div style={{flex:1}}>
+                              <div style={{display:'flex',gap:6,alignItems:'center'}}><span className="ex-name">{ex.name}</span><button className="btn-icon" onClick={e=>{e.stopPropagation();openEditModal(ss.id,side);}} title="Edit"><Pencil size={13}/></button></div>
+                              <div className="ex-target" style={{marginBottom:0,marginTop:2}}>Target: {ex.target}</div>
+                            </div>
+                            <select className="assist-select" value={ex.assist||100} onChange={async(e)=>{ await saveExOverride(ss.id,side,{assist: parseInt(e.target.value)}); }}>
+                              {ASSIST_LEVELS.map(a=><option key={a} value={a}>{a}%</option>)}
+                            </select>
                           </div>
-                          <div className="coaching-cue">{ex.coaching}</div>
-                          <div className="ex-target">Target: {ex.target} · {ex.band}</div>
+                          <div className="coaching-cue" style={{marginTop:8}}>{ex.coaching}</div>
                           <div className="video-slot"><VideoSlot videoUrl={getExVideo(ss.id,side)} editHint="Tap edit to add a video."/></div>
-                          <div className="sets-row">{sets.map((s,idx)=>(
-                            <button key={idx} className={`set-btn${s.missed?' missed':s.skipped?' skipped':s.done?' done':''}`}
-                              onClick={()=>{setModalVal(s.done?s.val:'');setModalBand(s.done?s.band:ex.band);setModalFeel(s.done?s.feel:'');setLogModal({iso:selectedISO,ssId:ss.id,side,setIdx:idx});}}>
-                              <span className="set-num">Set {idx+1}</span>
-                              {s.missed&&<span className="set-val">0</span>}{s.skipped&&<span className="set-val">Skip</span>}
-                              {s.done&&<><span className="set-val">✓ {s.val}</span><span className="set-feel">{s.feel}</span></>}
-                            </button>
-                          ))}</div>
+                          <div className="sets-container">
+                            {sets.map((s,idx)=>{
+                              const isEditing = !s.done && !s.skipped && !s.missed;
+                              return (
+                                <div key={idx} className={`set-row ${s.done?'done':s.skipped?'skipped':''}`}>
+                                  <div className="set-row-label">Set {idx+1}</div>
+                                  <div className="set-row-input-wrap">
+                                    {s.skipped ? <span className="set-skipped-text">Skipped</span> : 
+                                     s.missed ? <span className="set-skipped-text">0</span> :
+                                     s.done ? <span className="set-done-val">{ex.isWeighted&&s.weight?`+${s.weight}kg × `:''}{s.val}</span> :
+                                     (<>
+                                       {ex.isWeighted && <input type="number" inputMode="decimal" className="set-input weight-input" placeholder="kg" value={s.weight||''} onChange={e=>{
+                                         const n=[...sets]; n[idx].weight=e.target.value; writeSets(selectedISO,ss.id,side,n);
+                                       }}/>}
+                                       <input type="number" inputMode="decimal" className="set-input" placeholder="—" value={s.val} onChange={e=>{
+                                         const n=[...sets]; n[idx].val=e.target.value; writeSets(selectedISO,ss.id,side,n);
+                                       }}/>
+                                     </>)}
+                                  </div>
+                                  <div className="set-row-measure" onClick={async()=>{
+                                    if(s.done)return;
+                                    const newM = ex.measureType==='secs'?'reps':'secs';
+                                    await saveExOverride(ss.id,side,{measureType: newM});
+                                  }}>{ex.measureType||'reps'} <span style={{fontSize:8,opacity:0.5}}>▼</span></div>
+                                  
+                                  <div className="set-row-faces">
+                                    {isEditing && [4,3,2,1].map(f=><Face key={f} type={f} active={s.feel===f} onClick={()=>{
+                                      const n=[...sets]; n[idx].feel=f; writeSets(selectedISO,ss.id,side,n);
+                                    }}/>)}
+                                    {s.done && s.feel && <Face type={s.feel} active={true} />}
+                                  </div>
+                                  
+                                  <button className={`set-check-btn ${s.done?'done':''}`} onClick={()=>{
+                                    const n=[...sets];
+                                    if(s.done) { n[idx].done=false; writeSets(selectedISO,ss.id,side,n); return; }
+                                    if(s.val) { n[idx].done=true; writeSets(selectedISO,ss.id,side,n); startRestTimer(); }
+                                  }}><Check size={16} strokeWidth={3}/></button>
+                                </div>
+                              );
+                            })}
+                            <div className="skip-link" onClick={async()=>{
+                              const n=[...sets]; n.forEach(st=>{if(!st.done)st.skipped=true;});
+                              await writeSets(selectedISO,ss.id,side,n);
+                            }}>Skip remaining</div>
+                          </div>
                           {en?(<><div className="ex-note-text">{en}</div><button className="ex-note-btn" style={{marginTop:4}} onClick={()=>{setExNoteInput(en);setExNoteModal({iso:selectedISO,ssId:ss.id,side});}}>Edit note</button></>)
                             :(<button className="ex-note-btn" onClick={()=>{setExNoteInput('');setExNoteModal({iso:selectedISO,ssId:ss.id,side});}}>+ Add note</button>)}
                         </div>
@@ -477,7 +539,7 @@ export default function App() {
                       <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:6}}>{ss.label}</div>
                       {rows.map(({name,sets})=>(<div key={name} style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',padding:'6px 0',borderBottom:'0.5px solid var(--border)'}}>
                         <span style={{fontSize:12,color:'var(--text2)',flex:1,marginRight:8}}>{name}</span>
-                        <div style={{display:'flex',gap:4,flexWrap:'wrap',justifyContent:'flex-end'}}>{sets.map((s,i)=>(<span key={i} className={`session-set-pill ${s.missed?'missed':s.skipped?'skipped':'done'}`}>{s.missed?'0':s.skipped?'skip':`${s.val}${s.feel?` · ${s.feel}`:''}`}</span>))}</div>
+                        <div style={{display:'flex',gap:4,flexWrap:'wrap',justifyContent:'flex-end'}}>{sets.map((s,i)=>(<span key={i} className={`session-set-pill ${s.missed?'missed':s.skipped?'skipped':'done'}`}>{s.missed?'0':s.skipped?'skip':`${s.weight?`+${s.weight}kg × `:''}${s.val}${s.feel?` · ${s.feel}`:''}`}</span>))}</div>
                       </div>))}
                     </div>);
                   })}
@@ -507,7 +569,7 @@ export default function App() {
               {exHist.length>0&&(<div className="chart-card"><div style={{fontSize:11,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',fontWeight:600,marginBottom:8}}>Last session — {exHist[exHist.length-1].date}</div>
                 {exHist[exHist.length-1].sets.map((s,i)=>(<div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'5px 0',borderBottom:'0.5px solid var(--border)'}}>
                   <span style={{fontSize:12,color:'var(--text2)'}}>Set {i+1}</span>
-                  <div style={{display:'flex',gap:8,alignItems:'center'}}>{s.band&&s.band!=='Unassisted'&&<span style={{fontSize:10,color:'var(--blue)',background:'#0d1f3c',padding:'2px 7px',borderRadius:10}}>{s.band}</span>}{s.feel&&<span style={{fontSize:10,color:'var(--text3)'}}>{s.feel}</span>}<span style={{fontSize:13,fontWeight:700,color:'var(--green)'}}>{s.val}</span></div>
+                  <div style={{display:'flex',gap:8,alignItems:'center'}}>{s.assist&&s.assist!==100&&<span style={{fontSize:10,color:'var(--blue)',background:'#0d1f3c',padding:'2px 7px',borderRadius:10}}>{s.assist}%</span>}{s.feel&&<span style={{fontSize:10,color:'var(--text3)'}}>{s.feel}</span>}<span style={{fontSize:13,fontWeight:700,color:'var(--green)'}}>{s.weight?`+${s.weight}kg × `:''}{s.val}</span></div>
                 </div>))}
               </div>)}
             </>);
@@ -539,7 +601,7 @@ export default function App() {
             ))}
             <button className="action-btn purple" style={{marginTop:'16px'}} onClick={()=>{
               const newId = 'ss' + Math.random().toString(36).substring(7);
-              const newSS = { id: newId, label: 'New Superset', note: '', push: { name: 'New Push', sets: 3, target: '5 reps', band: 'Unassisted', role: 'Main', coaching: '', video: null }, pull: { name: 'New Pull', sets: 3, target: '5 reps', band: 'Unassisted', role: 'Main', coaching: '', video: null } };
+              const newSS = { id: newId, label: 'New Superset', note: '', push: { name: 'New Push', sets: 3, target: '5 reps', assist: 100, measureType: 'reps', isWeighted: false, role: 'Main', coaching: '', video: null }, pull: { name: 'New Pull', sets: 3, target: '5 reps', assist: 100, measureType: 'reps', isWeighted: false, role: 'Main', coaching: '', video: null } };
               syncProgramme([...supersets, newSS]);
             }}>+ Add New Superset</button>
           </div>
@@ -556,26 +618,18 @@ export default function App() {
         <button className="action-btn" style={{background:'var(--red)',marginTop:20}} onClick={()=>resetModal==='day'?clearDay(resetTargetISO):clearWeek()}>{resetModal==='day'?'Clear this day':'Reset current week'}</button>
         <button className="secondary-btn" onClick={()=>{setResetModal(null);setResetTargetISO(null);}}>Cancel</button>
       </div></div>)}
-      {logModal&&(<div className="modal-backdrop"><div className="modal">
-        <div className="modal-title"><span>{activeSS.find(s=>s.id===logModal.ssId)?.[logModal.side]?.name} — Set {logModal.setIdx+1}</span><button className="modal-close" onClick={()=>setLogModal(null)}>✕</button></div>
-        <div className="modal-sub">Target: {activeSS.find(s=>s.id===logModal.ssId)?.[logModal.side]?.target} · {activeSS.find(s=>s.id===logModal.ssId)?.[logModal.side]?.band}</div>
-        <div className="modal-label">Value (seconds / reps)</div>
-        <input className="val-input" type="number" inputMode="decimal" placeholder="0" value={modalVal} onChange={e=>setModalVal(e.target.value)} autoFocus/>
-        <div className="modal-label">Band</div><div className="band-row">{BANDS.map(b=><button key={b} className={`opt-btn${modalBand===b?' selected':''}`} onClick={()=>setModalBand(b)}>{b}</button>)}</div>
-        <div className="modal-label">Feel</div><div className="feel-row">{FEEL.map(f=><button key={f} className={`feel-btn${modalFeel===f?' selected':''}`} onClick={()=>setModalFeel(f)}>{f}</button>)}</div>
-        <button className="action-btn green" style={{marginTop:4}} onClick={async()=>{ if(!modalVal.trim()) return; const {iso,ssId,side,setIdx}=logModal; const sets=getSets(iso,ssId,side); sets[setIdx]={val:modalVal,band:modalBand,feel:modalFeel,done:true,skipped:false,missed:false}; await writeSets(iso,ssId,side,sets); setLogModal(null); startRestTimer(); }}>Log Set ✓</button>
-        <button className="secondary-btn" onClick={async()=>{ const {iso,ssId,side,setIdx}=logModal; const sets=getSets(iso,ssId,side); sets[setIdx]={val:'',band:'',feel:'',done:false,skipped:true,missed:false}; await writeSets(iso,ssId,side,sets); setLogModal(null); }}>Skip set</button>
-      </div></div>)}
+
       {editModal&&(<div className="modal-backdrop"><div className="modal">
         <div className="modal-title"><span>Edit exercise</span><button className="modal-close" onClick={()=>setEditModal(null)}>✕</button></div>
         <div style={{height:12}}/>
         <div className="modal-label">Name</div><input className="edit-input" value={editName} onChange={e=>setEditName(e.target.value)}/>
         <div className="modal-label">Target</div><input className="edit-input" value={editTarget} onChange={e=>setEditTarget(e.target.value)}/>
         <div className="modal-label">Sets</div><input className="edit-input" type="number" value={editSets} onChange={e=>setEditSets(parseInt(e.target.value)||3)}/>
-        <div className="modal-label">Default band</div><div className="band-row">{BANDS.map(b=><button key={b} className={`band-edit-btn${editBand===b?' selected':''}`} onClick={()=>setEditBand(b)}>{b}</button>)}</div>
+        <div className="modal-label" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><span>Weighted Exercise</span><input type="checkbox" checked={editWeighted} onChange={e=>setEditWeighted(e.target.checked)}/></div>
+        <div className="modal-label">Default assist</div><div className="band-row">{ASSIST_LEVELS.map(b=><button key={b} className={`band-edit-btn${editAssist===b?' selected':''}`} onClick={()=>setEditAssist(b)}>{b}%</button>)}</div>
         <div className="modal-label">Coaching cue</div><textarea className="edit-textarea" rows={2} value={editCoaching} onChange={e=>setEditCoaching(e.target.value)}/>
         <div className="modal-label">Video (yt:ID or url:https://…)</div><input className="edit-input" value={editVideo} onChange={e=>setEditVideo(e.target.value)} placeholder="e.g. yt:dQw4w9WgXcQ"/>
-        <button className="action-btn purple" style={{marginTop:4}} onClick={async()=>{ const ov={name:editName,target:editTarget,sets:editSets,band:editBand,coaching:editCoaching}; await saveExOverride(editModal.ssId,editModal.side,ov,editVideo); setEditModal(null); }}>Save</button>
+        <button className="action-btn purple" style={{marginTop:4}} onClick={async()=>{ const ov={name:editName,target:editTarget,sets:editSets,assist:editAssist,isWeighted:editWeighted,coaching:editCoaching}; await saveExOverride(editModal.ssId,editModal.side,ov,editVideo); setEditModal(null); }}>Save</button>
       </div></div>)}
       {ssNoteModal&&(<div className="modal-backdrop"><div className="modal">
         <div className="modal-title"><span>{ssNoteModal.label}</span><button className="modal-close" onClick={()=>setSsNoteModal(null)}>✕</button></div>
