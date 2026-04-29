@@ -124,7 +124,7 @@ export default function App() {
   const [swapCandidates, setSwapCandidates] = useState([]);
   const [swapLoading, setSwapLoading] = useState(false);
   const [briefingModal, setBriefingModal] = useState(false);
-  const [briefingPrompt, setBriefingPrompt] = useState(null);
+  const [briefingText, setBriefingText] = useState(null);
   const [briefingLoading, setBriefingLoading] = useState(false);
 
   async function openSwapModal(ssId, side, exName, slug) {
@@ -155,14 +155,57 @@ export default function App() {
       .sort()
       .pop();
     setBriefingModal(true);
-    setBriefingPrompt(null);
+    setBriefingText(null);
     setBriefingLoading(true);
+
     if (!lastISO) {
       setBriefingLoading(false);
       return;
     }
+
+    // Check cache first
+    const { data: cached } = await supabase
+      .from('session_history')
+      .select('briefing_text')
+      .eq('iso_date', lastISO)
+      .single();
+
+    if (cached?.briefing_text) {
+      setBriefingText(cached.briefing_text);
+      setBriefingLoading(false);
+      return;
+    }
+
+    // Build prompt from view
     const prompt = await buildBriefingPrompt(lastISO);
-    setBriefingPrompt(prompt);
+    if (!prompt) { setBriefingLoading(false); return; }
+
+    // Call Claude
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 400,
+          system: `You are a calisthenics coach giving a returning athlete a concise pre-session briefing. Be direct and specific. Max 4 bullet points. Use these symbols: ✓ maintain, ↑ push harder, ↓ back off, ⚠ injury/discomfort flag, → target/goal. Never generic advice. Reference specific exercises and numbers. Second person. No preamble.`,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
+      const data = await res.json();
+      const text = data.content?.[0]?.text || null;
+      setBriefingText(text);
+
+      // Cache to Supabase
+      if (text) {
+        await supabase
+          .from('session_history')
+          .update({ briefing_text: text, briefing_generated_at: new Date().toISOString() })
+          .eq('iso_date', lastISO);
+      }
+    } catch(e) {
+      console.error('Briefing error:', e);
+    }
     setBriefingLoading(false);
   }
 
@@ -780,13 +823,29 @@ export default function App() {
       </div></div>)}
 
       {briefingModal&&(<div className="modal-backdrop" onClick={()=>setBriefingModal(false)}><div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:'80vh',overflowY:'auto'}}>
-        <div className="modal-title"><span>Session briefing data</span><button className="modal-close" onClick={()=>setBriefingModal(false)}>✕</button></div>
-        <div style={{fontSize:11,color:'var(--text3)',marginBottom:12}}>Raw prompt data for {formatDate(selectedISO)} — copy and paste into your AI coach.</div>
-        {briefingLoading&&<div style={{textAlign:'center',padding:24,color:'var(--text3)',fontSize:13}}>Building…</div>}
-        {!briefingLoading&&briefingPrompt&&<pre style={{fontSize:11,lineHeight:1.6,color:'var(--text2)',background:'var(--bg2)',padding:12,borderRadius:8,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{briefingPrompt}</pre>}
-        {!briefingLoading&&!briefingPrompt&&<div style={{textAlign:'center',padding:24,color:'var(--text3)',fontSize:13}}>No session data found for this date.</div>}
-        {briefingPrompt&&<button className="action-btn purple" style={{marginTop:8}} onClick={()=>navigator.clipboard?.writeText(briefingPrompt)}>Copy to clipboard</button>}
-        <button className="secondary-btn" onClick={()=>setBriefingModal(false)}>Close</button>
+        <div className="modal-title">
+          <span style={{display:'flex',alignItems:'center',gap:8}}><span>Session briefing</span></span>
+          <button className="modal-close" onClick={()=>setBriefingModal(false)}>✕</button>
+        </div>
+        {briefingLoading&&(
+          <div style={{textAlign:'center',padding:32,color:'var(--text3)',fontSize:13}}>
+            <div style={{marginBottom:8,fontSize:18}}>⏳</div>
+            Preparing your briefing…
+          </div>
+        )}
+        {!briefingLoading&&!briefingText&&(
+          <div style={{textAlign:'center',padding:32,color:'var(--text3)',fontSize:13}}>No previous session data found.</div>
+        )}
+        {!briefingLoading&&briefingText&&(
+          <div style={{padding:'4px 0'}}>
+            {briefingText.split('\n').filter(l=>l.trim()).map((line,i)=>(
+              <div key={i} style={{fontSize:13,lineHeight:1.7,color:line.startsWith('⚠')?'var(--amber)':'var(--text)',padding:'6px 0',borderBottom:'0.5px solid var(--border)',display:'flex',gap:8,alignItems:'flex-start'}}>
+                {line}
+              </div>
+            ))}
+          </div>
+        )}
+        <button className="secondary-btn" onClick={()=>setBriefingModal(false)} style={{marginTop:16}}>Close</button>
       </div></div>)}
 
     </div>
