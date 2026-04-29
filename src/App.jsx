@@ -149,11 +149,19 @@ export default function App() {
     setSwapModal(null);
   }
 
-  async function openBriefing(iso) {
+  async function openBriefing() {
+    const lastISO = [...trainingDays]
+      .filter(d => d < selectedISO)
+      .sort()
+      .pop();
     setBriefingModal(true);
     setBriefingPrompt(null);
     setBriefingLoading(true);
-    const prompt = await buildBriefingPrompt(iso);
+    if (!lastISO) {
+      setBriefingLoading(false);
+      return;
+    }
+    const prompt = await buildBriefingPrompt(lastISO);
     setBriefingPrompt(prompt);
     setBriefingLoading(false);
   }
@@ -407,7 +415,7 @@ export default function App() {
         <span className="header-title">Cali Training</span>
         <div className="header-actions">
           {activeTab==='session'&&isTraining&&doneSetsCount(selectedISO)>0&&(<button className="save-btn-header" onClick={()=>attemptSave(selectedISO)}>Save session</button>)}
-          {activeTab==='session'&&isTraining&&(<button className="btn-icon" title="Session briefing" onClick={()=>openBriefing(selectedISO)} style={{fontSize:13}}>📋</button>)}
+          {activeTab==='session'&&isTraining&&(<button className="btn-icon" title="Session briefing" onClick={()=>openBriefing()} style={{fontSize:13}}>📋</button>)}
           <button className="icon-btn" title="Reset week" onClick={()=>setResetModal('week')} style={{opacity:0.45}}><RotateCcw size={14}/></button>
           <button className="icon-btn" style={{opacity:rehabOn?1:0.45,color:rehabOn?'var(--red)':'var(--text2)',background:rehabOn?'var(--red-bg)':'var(--bg3)'}} onClick={()=>setRehabOn(v=>!v)} title="Toggle rehab"><Plus size={14}/></button>
         </div>
