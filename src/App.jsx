@@ -180,20 +180,18 @@ export default function App() {
     const prompt = await buildBriefingPrompt(lastISO);
     if (!prompt) { setBriefingLoading(false); return; }
 
-    // Call Claude
+    // Call Claude via Edge Function
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 400,
-          system: `You are a calisthenics coach giving a returning athlete a concise pre-session briefing. Be direct and specific. Max 4 bullet points. Use these symbols: ✓ maintain, ↑ push harder, ↓ back off, ⚠ injury/discomfort flag, → target/goal. Never generic advice. Reference specific exercises and numbers. Second person. No preamble.`,
-          messages: [{ role: 'user', content: prompt }]
-        })
-      });
+      const res = await fetch(
+        'https://dxryqlcwbzcgjyqtqaij.supabase.co/functions/v1/session-briefing',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt })
+        }
+      );
       const data = await res.json();
-      const text = data.content?.[0]?.text || null;
+      const text = data.briefing ?? null;
       setBriefingText(text);
 
       // Cache to Supabase
