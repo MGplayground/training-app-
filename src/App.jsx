@@ -3,7 +3,7 @@ import { Pencil, Plus, RotateCcw, Trash2, Check } from 'lucide-react';
 import { supabase } from './supabaseClient';
 import {
   INIT_SS, REHAB_SS, ASSIST_LEVELS, FEEL_LABELS, DAYS,
-  RECOVERY, RECOVERY_EXTRAS,
+  RECOVERY, RECOVERY_EXTRAS, PHASE_CONFIG, generatePhaseWorkout,
 } from './data';
 
 function Face({ type, active, onClick }) {
@@ -90,6 +90,10 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const recIntervalsRef = useRef({});
   const longPressRef = useRef(null);
+  const [currentPhase, setCurrentPhase] = useState(
+    () => localStorage.getItem('cali_phase') || 'strength'
+  );
+  function setPhase(p) { setCurrentPhase(p); localStorage.setItem('cali_phase', p); }
 
   // ── AUTO WEEKLY RESET ─────────────────────────────────────────────
   // Silently wipes the previous week's training days + logs on first
@@ -407,9 +411,21 @@ export default function App() {
             <>
               {rehabOn&&<div className="rehab-banner">Rehab protocol active.</div>}
               {doneSetsCount(selectedISO)>0&&unloggedSets(selectedISO).length>0&&(<div className="incomplete-banner" onClick={()=>setGateModal(true)}>{unloggedSets(selectedISO).length} set{unloggedSets(selectedISO).length>1?'s':''} not yet logged</div>)}
+              <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
+                {Object.entries(PHASE_CONFIG).map(([key,cfg])=>(
+                  <button key={key} onClick={()=>setPhase(key)} style={{
+                    padding:'4px 10px',borderRadius:20,fontSize:11,fontWeight:700,cursor:'pointer',border:'none',
+                    background: currentPhase===key ? cfg.color : 'var(--bg3)',
+                    color: currentPhase===key ? '#fff' : 'var(--text3)',
+                    letterSpacing:'.5px',
+                  }}>{cfg.arrow} {cfg.label}</button>
+                ))}
+                <span style={{fontSize:10,color:'var(--text3)',alignSelf:'center',marginLeft:4}}>{PHASE_CONFIG[currentPhase]?.hint}</span>
+              </div>
               <div className="progress-bar"><div className="progress-fill" style={{width:`${prog.pct}%`}}/></div>
               <div className="progress-label">{prog.decided} / {prog.total} sets — {prog.pct}%</div>
               {activeSS.map((ss,i)=>{
+                const phasedSS = generatePhaseWorkout([ss], currentPhase)[0];
                 const isOpen=openSS===ss.id,done=ssDone(selectedISO,ss.id);
                 return(<div key={ss.id} className={`ss-card${done?' done-card':''}`}>
                   <div className="ss-header" onClick={()=>setOpenSS(isOpen?null:ss.id)}>
@@ -426,7 +442,7 @@ export default function App() {
                       <button className="reorder-btn" disabled={i===supersets.length-1} onClick={()=>{const a=[...supersets];[a[i],a[i+1]]=[a[i+1],a[i]];setSupersets(a);}}>&#8595;</button>
                     </div>)}
                     {['push','pull'].map((side,si)=>{
-                      const ex=ss[side],sets=getSets(selectedISO,ss.id,side);
+                      const ex=phasedSS[side],sets=getSets(selectedISO,ss.id,side);
                       const nk=`${selectedISO}_${ss.id}_${side}`,en=exNotes[nk]||'';
                       return(<div key={side}>
                         {si===1&&<div className="ex-divider"/>}

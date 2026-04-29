@@ -257,3 +257,36 @@ export const RECOVERY_EXTRAS = [
 ];
 
 export const FEEL_LABELS = ['Very poor', 'Poor', 'OK', 'Good', 'Peak'];
+
+// ─── Mesocycle Phase Configuration ───────────────────────────────────────────
+// setDelta: adjustment to the exercise's default set count (clamped min 1)
+// label / color: UI pill display
+// hint: coaching cue shown on the exercise row
+// NOTE: assist percentages are NEVER auto-adjusted — band selection is manual
+export const PHASE_CONFIG = {
+  volume:   { label: 'VOL',   color: '#3b82f6', setDelta: +1, hint: 'More volume — push set count, keep quality.', arrow: '▲' },
+  strength: { label: 'STR',   color: '#7c3aed', setDelta:  0, hint: 'Baseline block — hit the prescribed sets.', arrow: '●' },
+  peak:     { label: 'PEAK',  color: '#d97706', setDelta: -1, hint: 'Intensity week — fewer sets, go harder.', arrow: '▼' },
+  deload:   { label: 'LOAD',  color: '#6b7280', setDelta: -1, hint: 'Deload — flush the tissues, stay crisp.', arrow: '▽' },
+};
+
+/**
+ * Pure function — returns a deep-cloned array of supersets with set counts and
+ * target strings adjusted for the current mesocycle phase.
+ * Does NOT mutate INIT_SS or the live supersets state.
+ * Does NOT touch assist percentages — band selection stays manual.
+ */
+export function generatePhaseWorkout(supersets, phase = 'strength') {
+  const cfg = PHASE_CONFIG[phase] ?? PHASE_CONFIG.strength;
+  return supersets.map(ss => ({
+    ...ss,
+    push: ss.push ? adjustEx(ss.push, cfg) : ss.push,
+    pull: ss.pull ? adjustEx(ss.pull, cfg) : ss.pull,
+  }));
+}
+
+function adjustEx(ex, cfg) {
+  const newSets = Math.max(1, (ex.sets || 3) + cfg.setDelta);
+  return { ...ex, sets: newSets };
+}
+
