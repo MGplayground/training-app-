@@ -43,7 +43,33 @@ function VideoSlot({ videoUrl, editHint = 'Edit exercise to add a video.' }) {
   if (videoUrl.startsWith('yt:')) { const id = videoUrl.slice(3); return (<div className="video-embed"><iframe src={`https://www.youtube.com/embed/${id}?rel=0&modestbranding=1`} allowFullScreen title="Exercise video" /></div>); }
   const href = videoUrl.startsWith('url:') ? videoUrl.slice(4) : videoUrl;
   return (<a className="video-ext-link" href={href} target="_blank" rel="noreferrer">▶ Watch video</a>);
+}function SwapSVG({ size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
+      <path d="M1 4h9M7 1l3 3-3 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+      <path d="M13 10H4m3 3L4 10l3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
 }
+
+async function buildBriefingPrompt(iso) {
+  const { data: rows } = await supabase
+    .from('session_briefing_data')
+    .select('ss_id,side,avg_feel,sets_completed,sets_skipped,session_best,exercise_note,session_note,flags')
+    .eq('iso_date', iso);
+  if (!rows || rows.length === 0) return null;
+  const sessionNote = rows[0]?.session_note || null;
+  let lines = rows.map(row => {
+    let line = `${row.ss_id} ${row.side}: best=${row.session_best ?? '—'}, feel=${row.avg_feel ?? '—'}, done=${row.sets_completed}, skipped=${row.sets_skipped}`;
+    if (row.flags?.length) line += ` | flags: ${row.flags.map(f => f.note).join('; ')}`;
+    if (row.exercise_note) line += ` | athlete note: "${row.exercise_note}"`;
+    return line;
+  }).join('\n');
+  let prompt = lines;
+  if (sessionNote) prompt = `Session note from athlete: "${sessionNote}"\n\n` + prompt;
+  return prompt;
+}
+
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('session');
@@ -94,6 +120,43 @@ export default function App() {
     () => localStorage.getItem('cali_phase') || 'strength'
   );
   function setPhase(p) { setCurrentPhase(p); localStorage.setItem('cali_phase', p); }
+  const [swapModal, setSwapModal] = useState(null); // { ssId, side, exName, slug }
+  const [swapCandidates, setSwapCandidates] = useState([]);
+  const [swapLoading, setSwapLoading] = useState(false);
+  const [briefingModal, setBriefingModal] = useState(false);
+  const [briefingPrompt, setBriefingPrompt] = useState(null);
+  const [briefingLoading, setBriefingLoading] = useState(false);
+
+  async function openSwapModal(ssId, side, exName, slug) {
+    setSwapModal({ ssId, side, exName, slug });
+    setSwapCandidates([]);
+    setSwapLoading(true);
+    const { data } = await supabase
+      .from('exercise_swap_candidates')
+      .select('swap_slug,swap_name,swap_track,swap_direction,swap_difficulty,current_band,athlete_notes')
+      .eq('for_exercise_slug', slug)
+      .order('swap_direction')
+      .order('swap_difficulty');
+    setSwapCandidates(data || []);
+    setSwapLoading(false);
+  }
+
+  function onSwap(ssId, side, swapSlug, swapName) {
+    setSupersets(prev => prev.map(ss => {
+      if (ss.id !== ssId) return ss;
+      return { ...ss, [side]: { ...ss[side], name: swapName, slug: swapSlug } };
+    }));
+    setSwapModal(null);
+  }
+
+  async function openBriefing(iso) {
+    setBriefingModal(true);
+    setBriefingPrompt(null);
+    setBriefingLoading(true);
+    const prompt = await buildBriefingPrompt(iso);
+    setBriefingPrompt(prompt);
+    setBriefingLoading(false);
+  }
 
   // ── AUTO WEEKLY RESET ─────────────────────────────────────────────
   // Silently wipes the previous week's training days + logs on first
@@ -344,6 +407,7 @@ export default function App() {
         <span className="header-title">Cali Training</span>
         <div className="header-actions">
           {activeTab==='session'&&isTraining&&doneSetsCount(selectedISO)>0&&(<button className="save-btn-header" onClick={()=>attemptSave(selectedISO)}>Save session</button>)}
+          {activeTab==='session'&&isTraining&&(<button className="btn-icon" title="Session briefing" onClick={()=>openBriefing(selectedISO)} style={{fontSize:13}}>📋</button>)}
           <button className="icon-btn" title="Reset week" onClick={()=>setResetModal('week')} style={{opacity:0.45}}><RotateCcw size={14}/></button>
           <button className="icon-btn" style={{opacity:rehabOn?1:0.45,color:rehabOn?'var(--red)':'var(--text2)',background:rehabOn?'var(--red-bg)':'var(--bg3)'}} onClick={()=>setRehabOn(v=>!v)} title="Toggle rehab"><Plus size={14}/></button>
         </div>
@@ -449,7 +513,11 @@ export default function App() {
                         <div className="ex-block">
                           <div className="ex-top">
                             <div style={{flex:1}}>
-                              <div style={{display:'flex',gap:6,alignItems:'center'}}><span className="ex-name">{ex.name}</span><button className="btn-icon" onClick={e=>{e.stopPropagation();openEditModal(ss.id,side);}} title="Edit"><Pencil size={13}/></button></div>
+                              <div style={{display:'flex',gap:6,alignItems:'center'}}>
+                                <span className="ex-name">{ex.name}</span>
+                                <button className="btn-icon" onClick={e=>{e.stopPropagation();openEditModal(ss.id,side);}} title="Edit"><Pencil size={13}/></button>
+                                {ex.slug && <button className="btn-icon" onClick={e=>{e.stopPropagation();openSwapModal(ss.id,side,ex.name,ex.slug);}} title="Swap exercise"><SwapSVG size={13}/></button>}
+                              </div>
                               <div className="ex-target" style={{marginBottom:0,marginTop:2}}>Target: {ex.target}</div>
                             </div>
                             <select className="assist-select" value={ex.assist||100} onChange={async(e)=>{ await saveExOverride(ss.id,side,{assist: parseInt(e.target.value)}); }}>
@@ -675,6 +743,44 @@ export default function App() {
         <div style={{display:'flex',gap:8,marginBottom:20}}>{[1,2,3].map(n=>(<button key={n} onClick={()=>setFeedbackSessionNum(n)} style={{flex:1,padding:12,borderRadius:8,border:`1.5px solid ${feedbackSessionNum===n?'var(--purple)':'var(--border2)'}`,background:feedbackSessionNum===n?'#1a0f3c':'transparent',color:feedbackSessionNum===n?'var(--purple)':'var(--text2)',fontSize:14,fontWeight:700,cursor:'pointer'}}>{n}</button>))}</div>
         <button className="action-btn green" onClick={saveFeedback}>Done</button>
       </div></div>)}
+      {swapModal&&(<div className="modal-backdrop" onClick={()=>setSwapModal(null)}><div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:'80vh',overflowY:'auto'}}>
+        <div className="modal-title"><span>Swap exercise</span><button className="modal-close" onClick={()=>setSwapModal(null)}>✕</button></div>
+        <div style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>{swapModal.exName}</div>
+        {swapLoading&&<div style={{textAlign:'center',padding:24,color:'var(--text3)',fontSize:13}}>Loading…</div>}
+        {!swapLoading&&['easier','lateral','harder'].map(dir=>{
+          const group=swapCandidates.filter(c=>c.swap_direction===dir);
+          if(!group.length) return null;
+          return(<div key={dir} style={{marginBottom:16}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>{dir}</div>
+            {group.map(c=>{
+              const warn=c.athlete_notes&&(/shoulder|not testing/i.test(c.athlete_notes));
+              return(<button key={c.swap_slug} onClick={()=>onSwap(swapModal.ssId,swapModal.side,c.swap_slug,c.swap_name)} style={{display:'flex',alignItems:'center',gap:8,width:'100%',padding:'10px 12px',marginBottom:6,borderRadius:10,border:'1px solid var(--border2)',background:'var(--bg2)',cursor:'pointer',textAlign:'left'}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:600,color:'var(--text)'}}>{warn&&<span title={c.athlete_notes} style={{marginRight:4}}>⚠</span>}{c.swap_name}</div>
+                  <div style={{display:'flex',gap:6,marginTop:4}}>
+                    <span style={{fontSize:10,padding:'2px 7px',borderRadius:10,background:'var(--bg3)',color:'var(--text3)',fontWeight:600}}>{c.swap_track}</span>
+                    {c.current_band&&<span style={{fontSize:10,padding:'2px 7px',borderRadius:10,background:'#0d1f3c',color:'var(--blue)',fontWeight:600}}>{c.current_band}</span>}
+                  </div>
+                </div>
+                <span style={{fontSize:18,color:'var(--text3)'}}>›</span>
+              </button>);
+            })}
+          </div>);
+        })}
+        {!swapLoading&&swapCandidates.length===0&&<div style={{textAlign:'center',padding:24,color:'var(--text3)',fontSize:13}}>No swap candidates found for this exercise.</div>}
+        <button className="secondary-btn" onClick={()=>setSwapModal(null)} style={{marginTop:4}}>Cancel</button>
+      </div></div>)}
+
+      {briefingModal&&(<div className="modal-backdrop" onClick={()=>setBriefingModal(false)}><div className="modal" onClick={e=>e.stopPropagation()} style={{maxHeight:'80vh',overflowY:'auto'}}>
+        <div className="modal-title"><span>Session briefing data</span><button className="modal-close" onClick={()=>setBriefingModal(false)}>✕</button></div>
+        <div style={{fontSize:11,color:'var(--text3)',marginBottom:12}}>Raw prompt data for {formatDate(selectedISO)} — copy and paste into your AI coach.</div>
+        {briefingLoading&&<div style={{textAlign:'center',padding:24,color:'var(--text3)',fontSize:13}}>Building…</div>}
+        {!briefingLoading&&briefingPrompt&&<pre style={{fontSize:11,lineHeight:1.6,color:'var(--text2)',background:'var(--bg2)',padding:12,borderRadius:8,whiteSpace:'pre-wrap',wordBreak:'break-word'}}>{briefingPrompt}</pre>}
+        {!briefingLoading&&!briefingPrompt&&<div style={{textAlign:'center',padding:24,color:'var(--text3)',fontSize:13}}>No session data found for this date.</div>}
+        {briefingPrompt&&<button className="action-btn purple" style={{marginTop:8}} onClick={()=>navigator.clipboard?.writeText(briefingPrompt)}>Copy to clipboard</button>}
+        <button className="secondary-btn" onClick={()=>setBriefingModal(false)}>Close</button>
+      </div></div>)}
+
     </div>
   );
 }
