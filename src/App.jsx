@@ -151,11 +151,16 @@ export default function App() {
   }
 
   async function openBriefing() {
-    const lastISO = [...trainingDays]
-      .filter(d => d < selectedISO)
-      .sort()
-      .pop();
-    console.log('lastISO:', lastISO, 'trainingDays:', [...trainingDays]);
+    // Find last training day WITH actual logged sets (not just a marker)
+    const { data: loggedDates } = await supabase
+      .from('session_logs')
+      .select('iso_date')
+      .lt('iso_date', selectedISO)
+      .order('iso_date', { ascending: false });
+
+    // Most recent date that has at least one log entry before today
+    const lastISO = loggedDates?.find(r => r.iso_date < selectedISO)?.iso_date ?? null;
+
     setBriefingModal(true);
     setBriefingText(null);
     setBriefingLoading(true);
