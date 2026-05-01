@@ -151,26 +151,24 @@ export default function App() {
   }
 
   async function openBriefing() {
-    // Find last training day WITH actual logged sets (not just a marker)
-    const { data: loggedDates } = await supabase
-      .from('session_logs')
-      .select('iso_date')
-      .lt('iso_date', selectedISO)
-      .order('iso_date', { ascending: false });
-
-    // Most recent date that has at least one log entry before today
-    const lastISO = loggedDates?.find(r => r.iso_date < selectedISO)?.iso_date ?? null;
-
     setBriefingModal(true);
     setBriefingText(null);
     setBriefingLoading(true);
+
+    const { data: logDates } = await supabase
+      .from('session_logs')
+      .select('iso_date')
+      .lt('iso_date', selectedISO)
+      .order('iso_date', { ascending: false })
+      .limit(20);
+
+    const lastISO = logDates?.find(r => r.iso_date)?.iso_date ?? null;
 
     if (!lastISO) {
       setBriefingLoading(false);
       return;
     }
 
-    // Check cache first
     const { data: cached } = await supabase
       .from('session_history')
       .select('briefing_text')
@@ -183,11 +181,9 @@ export default function App() {
       return;
     }
 
-    // Build prompt from view
     const prompt = await buildBriefingPrompt(lastISO);
     if (!prompt) { setBriefingLoading(false); return; }
 
-    // Call Claude via Edge Function
     try {
       const res = await fetch(
         'https://dxryqlcwbzcgjyqtqaij.supabase.co/functions/v1/session-briefing',
@@ -200,8 +196,6 @@ export default function App() {
       const data = await res.json();
       const text = data.briefing ?? null;
       setBriefingText(text);
-
-      // Cache to Supabase
       if (text) {
         await supabase
           .from('session_history')
