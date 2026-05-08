@@ -53,11 +53,10 @@ function VideoSlot({ videoUrl, editHint = 'Edit exercise to add a video.' }) {
 }
 
 async function buildBriefingPrompt(iso) {
-  const { data: rows, error } = await supabase
+  const { data: rows } = await supabase
     .from('session_briefing_data')
     .select('ss_id, side, avg_feel, sets_completed, sets_skipped, session_best, exercise_note, session_note, flags')
-    .eq('iso_date', '2026-05-06');
-  console.log('briefing rows:', JSON.stringify(rows), 'error:', JSON.stringify(error));
+    .eq('iso_date', iso);
   if (!rows || rows.length === 0) return null;
   const sessionNote = rows[0]?.session_note || null;
   let lines = rows.map(row => {
