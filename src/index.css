@@ -531,6 +531,24 @@ body {
   border-left: 2px solid var(--border2);
   line-height: 1.5;
 }
+.ex-note-inline {
+  width: 100%;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+  box-sizing: border-box;
+  margin-top: 8px;
+  transition: border-color 0.15s;
+}
+.ex-note-inline:focus { border-color: var(--border2); }
+.ex-note-inline::placeholder { color: var(--text3); }
 
 /* ── DIVIDERS & REORDER ──────────────────────────────────────── */
 .ex-divider {
