@@ -89,7 +89,6 @@ export default function App() {
   const [selectedExKey, setSelectedExKey] = useState('ss1_push');
   const [editModal, setEditModal] = useState(null);
   const [ssNoteModal, setSsNoteModal] = useState(null);
-  const [exNoteModal, setExNoteModal] = useState(null);
   const [gateModal, setGateModal] = useState(false);
   const [feedbackModal, setFeedbackModal] = useState(null);
   const [resetModal, setResetModal] = useState(null);
@@ -102,7 +101,6 @@ export default function App() {
   const [editCoaching, setEditCoaching] = useState('');
   const [editVideo, setEditVideo] = useState('');
   const [ssNoteInput, setSsNoteInput] = useState('');
-  const [exNoteInput, setExNoteInput] = useState('');
   const [feedbackFeel, setFeedbackFeel] = useState(0);
   const [feedbackFlags, setFeedbackFlags] = useState('');
   const [feedbackSessionNum, setFeedbackSessionNum] = useState(0);
@@ -610,18 +608,25 @@ export default function App() {
                                   <button className={`set-check-btn ${s.done?'done':''}`} onClick={()=>{
                                     const n=[...sets];
                                     if(s.done) { n[idx].done=false; writeSets(selectedISO,ss.id,side,n); return; }
+                                    if(s.skipped) { n[idx]={val:'',assist:n[idx].assist||100,feel:null,done:false,skipped:false,missed:false}; writeSets(selectedISO,ss.id,side,n); return; }
                                     if(s.val) { n[idx].done=true; writeSets(selectedISO,ss.id,side,n); startRestTimer(); }
                                   }}><Check size={16} strokeWidth={3}/></button>
                                 </div>
                               );
                             })}
-                            <div className="skip-link" onClick={async()=>{
-                              const n=[...sets]; n.forEach(st=>{if(!st.done)st.skipped=true;});
-                              await writeSets(selectedISO,ss.id,side,n);
-                            }}>Skip remaining</div>
+                            {(()=>{
+                              const allSkipped=sets.length>0&&sets.every(st=>st.skipped);
+                              return(
+                                <div className="skip-link" onClick={async()=>{
+                                  const n=[...sets];
+                                  if(allSkipped){n.forEach(st=>{if(st.skipped){st.val='';st.feel=null;st.done=false;st.skipped=false;st.missed=false;}});}
+                                  else{n.forEach(st=>{if(!st.done)st.skipped=true;});}
+                                  await writeSets(selectedISO,ss.id,side,n);
+                                }}>{allSkipped?'Unskip all':'Skip remaining'}</div>
+                              );
+                            })()}
                           </div>
-                          {en?(<><div className="ex-note-text">{en}</div><button className="ex-note-btn" style={{marginTop:4}} onClick={()=>{setExNoteInput(en);setExNoteModal({iso:selectedISO,ssId:ss.id,side});}}>Edit note</button></>)
-                            :(<button className="ex-note-btn" onClick={()=>{setExNoteInput('');setExNoteModal({iso:selectedISO,ssId:ss.id,side});}}>+ Add note</button>)}
+                          <textarea key={nk} className="ex-note-inline" rows={2} placeholder="Add a note…" defaultValue={en} onBlur={e=>saveExNote(selectedISO,ss.id,side,e.target.value)}/>
                         </div>
                       </div>);
                     })}
@@ -768,11 +773,6 @@ export default function App() {
         <div className="modal-title"><span>{ssNoteModal.label}</span><button className="modal-close" onClick={()=>setSsNoteModal(null)}>✕</button></div>
         <div style={{height:12}}/><input className="edit-input" value={ssNoteInput} onChange={e=>setSsNoteInput(e.target.value)} placeholder="Brief description…"/>
         <button className="action-btn purple" style={{marginTop:4}} onClick={async()=>{await saveSsNoteOverride(ssNoteModal.ssId,ssNoteInput);setSsNoteModal(null);}}>Save</button>
-      </div></div>)}
-      {exNoteModal&&(<div className="modal-backdrop"><div className="modal">
-        <div className="modal-title"><span>{activeSS.find(s=>s.id===exNoteModal.ssId)?.[exNoteModal.side]?.name}</span><button className="modal-close" onClick={()=>setExNoteModal(null)}>✕</button></div>
-        <div style={{height:12}}/><textarea className="note-textarea" value={exNoteInput} onChange={e=>setExNoteInput(e.target.value)} placeholder="Add a note…"/>
-        <button className="action-btn purple" style={{marginTop:12}} onClick={async()=>{await saveExNote(exNoteModal.iso,exNoteModal.ssId,exNoteModal.side,exNoteInput);setExNoteModal(null);}}>Save</button>
       </div></div>)}
       {gateModal&&(<div className="modal-backdrop"><div className="modal">
         <div className="modal-title"><span>Unlogged sets</span><button className="modal-close" onClick={()=>setGateModal(false)}>✕</button></div>
