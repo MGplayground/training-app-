@@ -124,6 +124,7 @@ export default function App() {
   const [briefingModal, setBriefingModal] = useState(false);
   const [briefingText, setBriefingText] = useState(null);
   const [briefingLoading, setBriefingLoading] = useState(false);
+  const [toastVisible, setToastVisible] = useState(false);
 
   async function openSwapModal(ssId, side, exName, slug) {
     setSwapModal({ ssId, side, exName, slug });
@@ -378,7 +379,12 @@ export default function App() {
     const entry={iso_date:iso,date_label:formatDate(iso),log,note:sessionNotes[iso]||'',doneCount,saved_at:new Date().toISOString()};
     const idx=history.findIndex(h=>h.iso_date===iso); const nh=[...history];
     if(idx>=0) nh[idx]={...nh[idx],...entry}; else nh.push(entry);
-    setHistory(nh); await supabase.from('session_history').upsert(entry,{onConflict:'iso_date'});
+    setHistory(nh);
+    try {
+      const { error } = await supabase.from('session_history').upsert(entry, { onConflict: 'iso_date' });
+      if (error) console.error('doSave upsert error:', error);
+      else console.log('doSave: session_history upsert OK', iso, 'doneCount:', doneCount, 'logKeys:', Object.keys(log));
+    } catch(e) { console.error('doSave upsert threw:', e); }
     localStorage.removeItem('cali_logs_draft');
     setFeedbackModal(iso); setFeedbackFeel(0); setFeedbackFlags(''); setFeedbackSessionNum(0);
   }
@@ -386,7 +392,10 @@ export default function App() {
     if(!feedbackModal) return; const iso=feedbackModal;
     const upd={overall_feel:feedbackFeel||null,physical_flags:feedbackFlags||null,session_number:feedbackSessionNum||null};
     setHistory(history.map(h=>h.iso_date===iso?{...h,...upd}:h));
-    await supabase.from('session_history').update(upd).eq('iso_date',iso); setFeedbackModal(null);
+    await supabase.from('session_history').update(upd).eq('iso_date',iso);
+    setFeedbackModal(null);
+    setToastVisible(true);
+    setTimeout(() => setToastVisible(false), 2500);
   }
   function startRestTimer() {
     if(restIntervalRef.current) clearInterval(restIntervalRef.current);
@@ -453,7 +462,7 @@ export default function App() {
       <header className="header">
         <span className="header-title">Cali Training</span>
         <div className="header-actions">
-          {activeTab==='session'&&isTraining&&doneSetsCount(selectedISO)>0&&(<button className="save-btn-header" onClick={()=>attemptSave(selectedISO)}>Save session</button>)}
+          {activeTab==='session'&&isTraining&&(<button className="save-btn-header" onClick={()=>attemptSave(selectedISO)}>Save session</button>)}
           {activeTab==='session'&&isTraining&&(<button className="btn-icon" title="Session briefing" onClick={()=>openBriefing()} style={{fontSize:13}}>📋</button>)}
           <button className="icon-btn" title="Reset week" onClick={()=>setResetModal('week')} style={{opacity:0.45}}><RotateCcw size={14}/></button>
           <button className="icon-btn" style={{opacity:rehabOn?1:0.45,color:rehabOn?'var(--red)':'var(--text2)',background:rehabOn?'var(--red-bg)':'var(--bg3)'}} onClick={()=>setRehabOn(v=>!v)} title="Toggle rehab"><Plus size={14}/></button>
@@ -746,6 +755,7 @@ export default function App() {
           <div style={{height:40}}/>
         </>)}
       </div>
+      {toastVisible&&<div className="save-toast">Session saved ✓</div>}
       {restTimer&&(<div className="rest-timer"><div className="rest-circle">{Math.floor(restTimer.rem/60)}:{String(restTimer.rem%60).padStart(2,'0')}</div>
         <div style={{display:'flex',gap:6,flex:1,flexWrap:'wrap'}}>{[60,90,120,180].map(o=>(<button key={o} className={`rest-opt${restTimer.sel===o?' active':''}`} onClick={()=>setRestSel(o)}>{o===60?'1m':o===90?'1m30':o===120?'2m':'3m'}</button>))}</div>
         <button onClick={dismissRest} style={{width:32,height:32,borderRadius:'50%',border:'none',background:'var(--bg3)',color:'var(--text2)',cursor:'pointer',fontSize:16}}>✕</button>

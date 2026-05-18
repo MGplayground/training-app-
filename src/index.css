@@ -1193,6 +1193,22 @@ body {
 }
 .btn-icon:hover { opacity: 0.8; }
 
+/* ── SAVE TOAST ──────────────────────────────────────────────── */
+.save-toast {
+  position: fixed;
+  bottom: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--green);
+  color: #fff;
+  border-radius: 20px;
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  z-index: 200;
+  pointer-events: none;
+}
+
 /* ── REST TIMER ──────────────────────────────────────────────── */
 .rest-timer {
   position: fixed;
